@@ -2,7 +2,7 @@ import psycopg2
 import time
 
 # 1. 填入你的 DSN 连接字符串
-PG_DSN = "postgresql://postgresql_admin:Woshinibaba7421@pgm-uf6z9o14bx45x9i5.pg.rds.aliyuncs.com:2077/dy_live_data"
+PG_DSN = ""
 
 TARGET_INDEXES = [
     "public.idx_users_display_id",

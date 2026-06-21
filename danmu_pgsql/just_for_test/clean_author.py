@@ -7,7 +7,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("Cleaner")
 
 # 替换为你的真实数据库连接串
-DSN = "postgresql://postgresql_admin:Woshinibaba7421@pgm-uf6z9o14bx45x9i5.pg.rds.aliyuncs.com:2077/dy_live_data" 
+DSN = "" 
 
 # 👇 改为目标主播的 user_id
 TARGET_AUTHOR_USER_ID = "2949327753867716"  
