@@ -1,0 +1,210 @@
+/* src/app/globals.css */
+@import "tailwindcss";
+
+/* 适配战术暗黑模式的 v4 新写法 */
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  /* 绑定 Tailwind V4 核心语义变量 */
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-destructive: hsl(var(--destructive));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+}
+
+@layer base {
+  /* ➡️ 默认状态：硬核战术暗黑主题 */
+  :root {
+    --background: 220 30% 2%;
+    --foreground: 152 100% 70%;
+    --card: 220 30% 4%;
+    --primary: 152 100% 50%;
+    --primary-foreground: 220 30% 2%;
+    --border: 152 50% 20%;
+    --muted: 220 30% 10%;
+    --muted-foreground: 152 40% 50%;
+    --destructive: 0 100% 50%;
+    --accent: 25 100% 50%;
+    --input: 152 50% 15%;
+    --ring: 152 100% 50%;
+    --radius: 0px; /* 战术直角 */
+    --streamer: 190 90% 50%;
+  }
+
+  /* ➡️ 激活状态：猛男粉甜心主题 (必须挂载在 root 上) */
+  :root.theme-pink {
+    --background: 340 100% 97%;
+    --foreground: 340 60% 45%;
+    --card: 0 0% 100%;
+    --primary: 340 100% 75%;
+    --primary-foreground: 0 0% 100%;
+    --border: 340 80% 90%;
+    --muted: 340 50% 95%;
+    --muted-foreground: 340 40% 60%;
+    --destructive: 0 80% 65%;
+    --accent: 37 100% 65%;
+    --input: 340 50% 95%;
+    --ring: 340 100% 75%;
+    --radius: 1rem;
+    --streamer: 190 90% 50%;
+    
+    /* 甜心圆润字体栈 (Nunito + 幼圆/圆体) */
+    --font-body: var(--font-cute), 'Yuanti SC', 'YouYuan', 'Microsoft Yahei', sans-serif;
+  }
+  * { @apply border-border; }
+  
+  /* 全局响应颜色过渡 */
+  body {
+    @apply bg-background text-foreground transition-colors duration-500 antialiased;
+  }
+}
+
+/* 战术主题独有特效 (仅在非粉红模式下生效) */
+:root:not(.theme-pink) body {
+  background-image: 
+    linear-gradient(rgba(0, 255, 127, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 255, 127, 0.05) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* CRT 扫描线效果层 - 只在战术主题显示
+:root:not(.theme-pink) body::after {
+  content: " ";
+  position: fixed;
+  top: 0; left: 0; bottom: 0; right: 0;
+  background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.1) 50%);
+  background-size: 100% 4px;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0.2;
+} */
+
+/* 动态水平扫描光效 - 只在战术主题显示 
+@keyframes scanline {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
+}
+
+:root:not(.theme-pink) body::before {
+  content: "";
+  position: fixed;
+  top: 0; left: 0; width: 100%; height: 2px;
+  background: rgba(0, 255, 127, 0.1);
+  box-shadow: 0 0 10px rgba(0, 255, 127, 0.5);
+  z-index: 10000;
+  animation: scanline 8s linear infinite;
+  pointer-events: none;
+}
+*/
+/* =========================================
+   粉红甜心主题独有样式
+   ========================================= */
+.theme-pink body {
+  /* 柔和的渐变背景 */
+  background-image: linear-gradient(135deg, #fff5f7 0%, #fceef3 100%);
+  /* 移除战术阴影 */
+  box-shadow: none;
+}
+
+
+/* =========================================
+   组件样式定制 (根据主题自动切换)
+   ========================================= */
+
+/* 数字化卡片样式定制 */
+[data-slot="card"] {
+  @apply relative border-2 bg-card/80 backdrop-blur-sm transition-all duration-500;
+  
+  /* 默认战术风格：切角 + 直角 */
+  clip-path: polygon(0 0, calc(100% - 15px) 0, 100% 15px, 100% 100%, 15px 100%, 0 calc(100% - 15px));
+  border-radius: var(--radius) !important;
+}
+
+/* 粉红模式下重置卡片形状 */
+.theme-pink [data-slot="card"] {
+  clip-path: none; /* 移除切角 */
+  border-width: 1px; /* 边框变细 */
+  box-shadow: 0 4px 20px rgba(255, 182, 193, 0.2); /* 柔和粉色阴影 */
+}
+
+/* 滚动条定制 */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+/* 滚动条颜色随 primary 变量变化 */
+::-webkit-scrollbar-thumb {
+  background: var(--primary);
+  border-radius: var(--radius);
+}
+:root:not(.theme-pink) ::-webkit-scrollbar-thumb { box-shadow: 0 0 5px var(--primary); }
+
+/* 输入框战术化/甜心化 */
+[data-slot="input"] {
+  @apply border-2 border-primary/30 bg-background/50 tracking-widest transition-all duration-300;
+  font-weight: 800;
+  border-radius: var(--radius) !important;
+}
+.theme-pink [data-slot="input"] {
+    text-transform: none;
+    font-weight: normal;
+    letter-spacing: normal;
+    border-width: 1px;
+    @apply placeholder:text-muted-foreground;
+}
+
+[data-slot="input"]:focus {
+  @apply border-primary ring-0;
+}
+:root:not(.theme-pink) [data-slot="input"]:focus { box-shadow: 0 0 15px rgba(0, 255, 127, 0.2); }
+.theme-pink [data-slot="input"]:focus { box-shadow: 0 0 0 3px rgba(255, 182, 193, 0.4); }
+
+/* 按钮战术化/甜心化 */
+[data-slot="button"] {
+  @apply tracking-widest font-black transition-all duration-300;
+  /* 默认战术切角 */
+  clip-path: polygon(10% 0, 100% 0, 100% 70%, 90% 100%, 0 100%, 0 30%);
+  border-radius: var(--radius) !important;
+}
+
+.theme-pink [data-slot="button"] {
+  clip-path: none; /* 移除切角 */
+  text-transform: none;
+  letter-spacing: 1px;
+  font-weight: bold;
+  box-shadow: 0 4px 10px rgba(255, 105, 180, 0.3);
+}
+/* 在粉红模式下，强制所有元素（包括原本写了 font-mono 的战术元素）使用甜美圆润字体 */
+.theme-pink, 
+.theme-pink * {
+  font-family: var(--font-body) !important;
+  letter-spacing: normal !important; /* 取消战术模式那种字间距拉开的效果 */
+}
+[data-slot="button"]:hover { @apply scale-105; }
+:root:not(.theme-pink) [data-slot="button"]:hover { text-shadow: 0 0 8px currentColor; }
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px; /* 滚动条宽度变窄 */
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent; /* 轨道透明 */
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: hsl(var(--muted-foreground) / 0.3); /* 使用主题里的柔和色 */
+  border-radius: 10px; /* 圆角 */
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: hsl(var(--primary) / 0.5); /* 鼠标悬浮时颜色加深 */
+}
