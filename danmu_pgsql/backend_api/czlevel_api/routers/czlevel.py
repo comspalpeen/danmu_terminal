@@ -7,7 +7,6 @@ from backend_api.common.models import CzLevelBatchRequest
 
 # 仅从微服务本地引入极简函数
 from backend_api.czlevel_api.routers.services import (
-    parse_query_target,
     fetch_users_batch_from_db,
     push_to_update_queue
 )
@@ -22,24 +21,13 @@ async def batch_check_cz_level(req: CzLevelBatchRequest, request: Request):
 
     if not targets: raise HTTPException(status_code=400, detail="查询参数不能为空")
     if len(targets) > 100: raise HTTPException(status_code=400, detail="批量查询不能超过 100 条")
-        
-    parsed_targets = {}
-    sec_uids_to_query, display_ids_to_query = [], []
-    
-    for t in targets:
-        target_sec_uid, target_display_id = parse_query_target(t)
-        if target_sec_uid:
-            parsed_targets[t] = {"type": "sec_uid", "value": target_sec_uid}
-            sec_uids_to_query.append(target_sec_uid)
-        else:
-            parsed_targets[t] = {"type": "display_id", "value": t}
-            display_ids_to_query.append(t)
 
     pool = get_db()
     redis = await get_redis()
     
     try: 
-        db_records = await fetch_users_batch_from_db(pool, sec_uids_to_query, display_ids_to_query)
+        # 直接使用 targets (纯 display_id) 查库
+        db_records = await fetch_users_batch_from_db(pool, targets)
     except Exception as e:
         logger.error(f"❌ 批量查库异常: {e}")
         db_records = {}
@@ -47,9 +35,8 @@ async def batch_check_cz_level(req: CzLevelBatchRequest, request: Request):
     final_response = []
     
     for t in targets:
-        item = parsed_targets[t]
-        val_str = str(item["value"])
-        record = db_records.get(val_str) or db_records.get(val_str.lower())
+        # 直接从精简后的字典取值
+        record = db_records.get(t) or db_records.get(t.lower())
         source = "database_only" if record else "not_found"
 
         level = 0
@@ -58,9 +45,9 @@ async def batch_check_cz_level(req: CzLevelBatchRequest, request: Request):
             level = raw_level if raw_level is not None else 0
             final_response.append({
                 "query":      t,
-                "user_id":    str(record.get('user_id', '')),  # 👉 新增 user_id 字段
+                "user_id":    str(record.get('user_id', '')),  
                 "sec_uid":    record.get('sec_uid') or "",
-                "display_id": record.get('display_id') or (val_str if item["type"] == "display_id" else ""),
+                "display_id": record.get('display_id') or t,
                 "nickname":   record.get('user_name') or "未知用户",
                 "avatar":     build_avatar_url(record.get('avatar_url')),
                 "level":      level,
@@ -70,9 +57,9 @@ async def batch_check_cz_level(req: CzLevelBatchRequest, request: Request):
         else:
             final_response.append({
                 "query":      t,
-                "user_id":    "",                              # 👉 新增 user_id 空字符串作为兜底
+                "user_id":    "",                              
                 "sec_uid":    "",
-                "display_id": val_str if item["type"] == "display_id" else "",
+                "display_id": t,  # 直接返回查询的目标 t
                 "nickname":   "查无此人",
                 "avatar":     "",
                 "level":      0,
@@ -81,7 +68,9 @@ async def batch_check_cz_level(req: CzLevelBatchRequest, request: Request):
             })
 
         if level < 12:
-            target_for_queue = record['sec_uid'] if (record and record.get('sec_uid')) else val_str
+            # ✅ 维持原状：即使我们用 display_id 查库，只要库里有对应的 sec_uid，
+            # 这里依然会优先将 sec_uid 推送给后端的爬虫队列。
+            target_for_queue = record['sec_uid'] if (record and record.get('sec_uid')) else t
             asyncio.create_task(push_to_update_queue(redis, target_for_queue, level))
 
     return {"results": final_response}

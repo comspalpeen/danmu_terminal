@@ -67,9 +67,11 @@ class AsyncPostgresHandler:
             ON CONFLICT (user_id) DO UPDATE SET
                 sec_uid = EXCLUDED.sec_uid,
                 display_id = CASE WHEN EXCLUDED.display_id != '' THEN EXCLUDED.display_id ELSE users.display_id END,
-                user_name = EXCLUDED.user_name, gender = EXCLUDED.gender,
+                user_name = CASE WHEN $8 = TRUE THEN users.user_name ELSE EXCLUDED.user_name END,
+                gender = EXCLUDED.gender,
                 pay_grade = GREATEST(users.pay_grade, EXCLUDED.pay_grade),
-                avatar_url = EXCLUDED.avatar_url, updated_at = CURRENT_TIMESTAMP;
+                avatar_url = CASE WHEN $8 = TRUE THEN users.avatar_url ELSE EXCLUDED.avatar_url END,
+                updated_at = CURRENT_TIMESTAMP;
         """
         
         self.UPSERT_CZ_FANS_SQL = """
@@ -106,8 +108,8 @@ class AsyncPostgresHandler:
         except Exception as e:
             logger.error(f"❌ 恢复备份队列失败: {e}")
 
-    def _get_user_fingerprint(self, uid, sec_uid, display_id, user_name, gender, pay_grade, avatar_url):
-        raw = f"{uid}_{sec_uid}_{display_id}_{user_name}_{gender}_{pay_grade}_{avatar_url}"
+    def _get_user_fingerprint(self, uid, sec_uid, display_id, user_name, gender, pay_grade, avatar_url, is_mystery=False):
+        raw = f"{uid}_{sec_uid}_{display_id}_{user_name}_{gender}_{pay_grade}_{avatar_url}_{is_mystery}"
         return hashlib.md5(raw.encode('utf-8')).hexdigest()
     async def process_light_stick(self, data: dict):
         data['_is_light_stick'] = True
@@ -197,6 +199,8 @@ class AsyncPostgresHandler:
                         current_pay = max(current_pay, existing_user[5]) # 索引5是 pay_grade
                         clean_avatar = clean_avatar or existing_user[6]  # 防止新数据头像为空覆盖旧数据
 
+                    is_mystery = data.get('is_mystery', False) # 新增：提取神秘人标志
+
                     users_batch[uid] = (
                         uid, 
                         data.get('sec_uid', '') or (existing_user[1] if existing_user else ''), 
@@ -204,7 +208,8 @@ class AsyncPostgresHandler:
                         data.get('user_name', '') or (existing_user[3] if existing_user else ''), 
                         data.get('gender', 0), 
                         current_pay, 
-                        clean_avatar
+                        clean_avatar,
+                        is_mystery # 新增：第 8 个参数
                     )
 
                     # 2. 收集陈泽房间活跃者 (维持本批次内的最高粉丝等级)
@@ -614,7 +619,7 @@ class AsyncPostgresHandler:
         if not user_info or not user_info.get('user_id') or self._shutting_down: return
         uid = user_info['user_id']
         current_cz_level = user_info.get('cz_club_level', 0)
-        
+        is_mystery = user_info.get('is_mystery', False) # 新增
         try:
             redis_client = get_redis()
             # 防线 1：判断专属活跃等级是否突破 (升级检测)
@@ -633,7 +638,7 @@ class AsyncPostgresHandler:
             current_hash = self._get_user_fingerprint(
                 uid, user_info.get('sec_uid', ''), user_info.get('display_id', ''),
                 user_info.get('user_name', ''), user_info.get('gender', 0), 
-                user_info.get('pay_grade', 0), clean_avatar
+                user_info.get('pay_grade', 0), clean_avatar, is_mystery # 补上参数
             )
             hash_key = f"user:hash:{uid}"
             try:
@@ -650,7 +655,7 @@ class AsyncPostgresHandler:
                 async with conn.transaction():
                     if needs_global_update:
                         await conn.execute(self.UPSERT_USERS_SQL, uid, user_info.get('sec_uid', ''), user_info.get('display_id', ''),
-                             user_info.get('user_name', ''), user_info.get('gender', 0), user_info.get('pay_grade', 0), clean_avatar)
+                            user_info.get('user_name', ''), user_info.get('gender', 0), user_info.get('pay_grade', 0), clean_avatar, is_mystery)
                         try: await redis_client.setex(hash_key, 604800, current_hash)
                         except: pass
 

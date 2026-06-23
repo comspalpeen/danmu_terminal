@@ -171,7 +171,8 @@ def extract_user_info(user, current_live_id=""):
         "pay_grade_icon": "",
         "fans_club_level": 0,
         "fans_club_icon": "",
-        "fans_club_anchor_id": "", # ✅ 新增字段：用于记录当前佩戴灯牌的归属主播UID
+        "fans_club_anchor_id": "", 
+        "is_mystery": (getattr(user, "mystery_man", 0) == 2), # ✅ 新增：透传神秘人标志
     }
 
     try:

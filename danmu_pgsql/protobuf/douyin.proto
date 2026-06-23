@@ -94,8 +94,8 @@ message User {
   int32 Status = 15;
   uint64 CreateTime = 16;
   uint64 ModifyTime = 17;
-  uint32 Secret = 18;
-  string ShareQrcodeUri = 19;
+  bool is_mystery_man = 18;
+  bool is_anonymous = 19;
   uint32 IncomeSharePercent = 20;
   repeated Image BadgeImageList = 21;
   FollowInfo FollowInfo = 22;
@@ -108,6 +108,7 @@ message User {
   string displayId = 38;
   string secUid = 46;
   repeated Image NewBadgeImageList = 61;
+  int32 mystery_man = 66;
   BadgeDisplayInfo badge_display_info = 78;
   uint64 fanTicketCount = 1022;
   string idStr = 1028;
@@ -903,4 +904,8 @@ message SyncMeta {
 }
 message RoomMessage {
   Common common = 1;
+}
+message EmojiChatMessage {
+  Common common = 1;
+  User user = 2;
 }

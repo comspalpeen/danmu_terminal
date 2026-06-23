@@ -37,9 +37,6 @@ async def get_ttwid(force_refresh=False) -> str:
     
     return ttwid
 
-import random
-import re
-import os
 
 def build_avatar_url(filename: str) -> str:
     if not filename: return ""
@@ -90,7 +87,7 @@ def build_avatar_url(filename: str) -> str:
     # 5. 兜底彻底烂掉的极短脏数据 (如 "40", "132")
     # ==========================================
     if name_part.isdigit() and len(name_part) <= 3:
-        return "https://p3-webcast.douyinpic.com/img/webcast/mystery_man_thumb_avatar.png~tplv-obj.image"
+        return "https://p3.douyinpic.com/aweme/100x100/aweme-avatar/mosaic-legacy_3795_3033762272.jpeg?from=3067671334"
 
     # ==========================================
     # 6. 处理神秘人、短哈希、常规头像 (aweme 路径)

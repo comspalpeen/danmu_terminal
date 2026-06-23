@@ -73,7 +73,11 @@ class MessageHandler:
         return teams
 
     async def handle(self, method, payload):
-        if method in ("WebcastMemberMessage", "WebcastFansclubMessage", "WebcastSocialMessage","WebcastMemberMessage",):
+        if method in ("WebcastMemberMessage", 
+                      "WebcastFansclubMessage", 
+                      "WebcastSocialMessage",
+                      "WebcastRoomMessage",
+                      "WebcastEmojiChatMessage"):
             if str(self.live_id) != "615189692839":
                 return False
         try:
@@ -99,6 +103,8 @@ class MessageHandler:
                 await self._parse_social(payload)
             elif method == "WebcastRoomMessage":          # 新增：拦截 VIP 通道等直播间特殊消息
                 await self._parse_room_message(payload)   # 新增：调用专门的解析方法
+            elif method == "WebcastEmojiChatMessage":
+                await self._parse_emojichat(payload)
             # elif method == "WebcastLinkMessage":
             #      await self._parse_link_message(payload)
             elif method == "WebcastLinkMicMethod":
@@ -539,6 +545,15 @@ class MessageHandler:
 
         except Exception as e:
             logger.error(f"解析 RoomMessage 异常: {e}", exc_info=True)
+    async def _parse_emojichat(self, payload):
+        try:
+            message = douyin_pb2.EmojiChatMessage()
+            message.ParseFromString(payload)
+            if message.HasField("user"):
+                user_info = extract_user_info(message.user, self.live_id)
+                await self._check_and_save_vip(user_info)
+        except Exception:
+            pass
     # async def _parse_link_message(self, payload):
     #     try:
     #         message = douyin_pb2.LinkMessage()

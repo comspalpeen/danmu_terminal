@@ -239,6 +239,7 @@ async def fetch_douyin_fans_task(task_id: str):
                 nickname = EXCLUDED.nickname,
                 club_level = EXCLUDED.club_level,
                 intimacy = EXCLUDED.intimacy,
+                participate_time = CASE WHEN EXCLUDED.participate_time > 0 THEN EXCLUDED.participate_time ELSE high_level_fans.participate_time END,
                 avatar_url = COALESCE(EXCLUDED.avatar_url, high_level_fans.avatar_url),
                 display_id = COALESCE(EXCLUDED.display_id, high_level_fans.display_id),
                 pay_grade = GREATEST(high_level_fans.pay_grade, COALESCE(EXCLUDED.pay_grade, 0)),
@@ -251,9 +252,23 @@ async def fetch_douyin_fans_task(task_id: str):
             for f in collected_users
         ]
 
+        # 2. 准备 cz_fans 简表更新的 SQL 和参数
+        upsert_cz_fans_sql = """
+            INSERT INTO cz_fans (user_id, cz_club_level)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET
+                cz_club_level = GREATEST(cz_fans.cz_club_level, EXCLUDED.cz_club_level)
+        """
+        cz_fans_args = [(f["user_id"], f["club_level"]) for f in collected_users]
+
+        # 3. 开启事务，同时写入两张表
         async with pool.acquire() as conn:
-            await conn.executemany(upsert_sql, args)
-            logger.info(f"[{task_id}] 💾 数据库同步完成: 已更新老粉信息并写入新粉。")
+            async with conn.transaction(): # 开启事务，确保两张表要么同时成功，要么同时失败
+                await conn.executemany(upsert_sql, args)
+                await conn.executemany(upsert_cz_fans_sql, cz_fans_args)
+                
+            logger.info(f"[{task_id}] 💾 数据库同步完成: 已更新高等级详情并同步至 cz_fans 表。")
+            
         await redis.setex(f"scan_task:{task_id}", 3600, json.dumps({
             "status": "completed", 
             "message": "扫描与数据同步完成"
@@ -342,7 +357,8 @@ async def export_and_save_new_fans(payload: ExportNewRequest):
 async def export_all_fans():
     pool = get_db()
     async with pool.acquire() as conn:
-        records = await conn.fetch("SELECT * FROM high_level_fans ORDER BY intimacy DESC")
+        # 优化排序：先按等级 (club_level) 降序，再按成长值 (intimacy) 降序
+        records = await conn.fetch("SELECT * FROM high_level_fans ORDER BY club_level DESC, intimacy DESC")
     
     fans_list = [dict(r) for r in records]
     
