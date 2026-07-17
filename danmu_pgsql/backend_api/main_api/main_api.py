@@ -5,7 +5,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from routers import check, favorites, reports, tieba, rooms, authors, search, admin, tools, tools_high_level, czlevel
+from routers import check, favorites, reports, tieba, rooms, authors, search, admin, tools, tools_high_level, single_czlevel
 from backend_api.common.database import lifespan as db_lifespan
 from src.db.redis_client import init_redis, close_redis
 @asynccontextmanager
@@ -35,7 +35,7 @@ app.include_router(search.router)
 app.include_router(admin.router)
 app.include_router(tools.router)
 app.include_router(tools_high_level.router)
-app.include_router(czlevel.router)
+app.include_router(single_czlevel.router)
 if __name__ == "__main__":
     uvicorn.run(
         "main_api:app", 

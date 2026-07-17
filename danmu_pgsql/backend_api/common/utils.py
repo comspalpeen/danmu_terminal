@@ -1,10 +1,12 @@
 import re
 import os
-import aiohttp
+import logging
+# 👇 修改引入：改用 curl_cffi 的 AsyncSession
+from curl_cffi.requests import AsyncSession
 from backend_api.common.database import get_redis
-from backend_api.common.user_agents import get_dynamic_headers
-from backend_api.common.config import HEADERS
 import random
+logger = logging.getLogger("TtwidService")
+
 async def get_ttwid(force_refresh=False) -> str:
     redis = await get_redis()
     cache_key = "douyin:ttwid"
@@ -14,26 +16,35 @@ async def get_ttwid(force_refresh=False) -> str:
         try:
             cached_ttwid = await redis.get(cache_key)
             if cached_ttwid:
-                return cached_ttwid
+                # 兼容处理 bytes 类型缓存
+                return cached_ttwid.decode() if isinstance(cached_ttwid, bytes) else cached_ttwid
         except Exception as e:
-            print(f"[Redis Error] get ttwid: {e}")
+            logger.error(f"[Redis Error] get ttwid: {e}")
 
     # 强制刷新或缓存不存在：去首页取
-    print("🔄 [Searcher] 正在获取新的 ttwid...")
+    logger.info("🔄 [Searcher] 正在获取新的 ttwid...")
     ttwid = ""
-    headers = HEADERS.copy()
+    
     try:
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get("https://live.douyin.com/", timeout=5) as resp:
-                cookies = session.cookie_jar.filter_cookies("https://live.douyin.com/")
-                ttwid = cookies.get("ttwid", {}).value if "ttwid" in cookies else ""
+        # 👇 初始化 AsyncSession，并指定 impersonate 浏览器指纹类型（自动处理 UA 和 sec-ch-ua-platform）
+        # 这里完全不需要再传入旧的、不匹配的固定的自定义 HEADERS
+        async with AsyncSession(impersonate="chrome124") as session:
+            resp = await session.get("https://live.douyin.com/", timeout=5)
+            
+            if resp.status_code == 200:
+                # 👇 避坑：curl_cffi 的 session.cookies 可以直接通过 .get() O(1) 获取指定的 key
+                ttwid = session.cookies.get("ttwid", "")
+                
     except Exception as e:
-        print(f"[Network Error] fetch ttwid: {e}")
+        logger.error(f"[Network Error] fetch ttwid: {e}")
 
     if ttwid and redis:
         try:
-            await redis.setex(cache_key, 3600, ttwid)
-        except: pass
+            # 维持原有的 2 小时缓存有效期
+            await redis.setex(cache_key, 7200, ttwid)
+            logger.info(f"✅ [Searcher] 成功更新 ttwid 并写入 Redis: {ttwid[:10]}...")
+        except Exception as e: 
+            logger.error(f"[Redis Error] save ttwid failed: {e}")
     
     return ttwid
 
@@ -66,7 +77,7 @@ def build_avatar_url(filename: str) -> str:
     # 2. 兼容 xavatar (三段式纯数字长 ID)
     # ==========================================
     if bool(re.fullmatch(r'\d+-\d+-\d+', name_part)):
-        return f"https://{cdn_prefix}.douyinpic.com/img/aweme-avatar/xavatar/{filename}~c5_100x100.jpeg?from=3067671334"
+        return f"https://{cdn_prefix}.douyinpic.com/img/aweme-avatar/xavatar/{filename}~c5_1080x1080.jpeg?from=3067671334"
 
     # ==========================================
     # 3. 兼容 32 位哈希格式的“现代版”头像 (新案例：c4727...)
@@ -74,7 +85,7 @@ def build_avatar_url(filename: str) -> str:
     # ==========================================
     is_hash = bool(re.fullmatch(r'[a-f0-9]{32}', name_part))
     if is_hash and filename.lower().endswith(".jpeg"):
-        return f"https://{cdn_prefix}.douyinpic.com/img/aweme-avatar/{original_name}~c5_100x100.jpeg?from=3067671334"
+        return f"https://{cdn_prefix}.douyinpic.com/img/aweme-avatar/{original_name}~c5_1080x1080.jpeg?from=3067671334"
 
     # ==========================================
     # 4. 兼容 32 位哈希格式的“直播间”头像 (Webcast 专用)
@@ -87,7 +98,7 @@ def build_avatar_url(filename: str) -> str:
     # 5. 兜底彻底烂掉的极短脏数据 (如 "40", "132")
     # ==========================================
     if name_part.isdigit() and len(name_part) <= 3:
-        return "https://p3.douyinpic.com/aweme/100x100/aweme-avatar/mosaic-legacy_3795_3033762272.jpeg?from=3067671334"
+        return "https://p3.douyinpic.com/aweme/1080x1080/aweme-avatar/mosaic-legacy_3795_3033762272.jpeg?from=3067671334"
 
     # ==========================================
     # 6. 处理神秘人、短哈希、常规头像 (aweme 路径)
@@ -102,7 +113,7 @@ def build_avatar_url(filename: str) -> str:
         return f"https://{cdn_prefix}.douyinpic.com/aweme/100x100/{final_filename}?from=3067671334"
 
     # 常规用户头像 (带 aweme-avatar 目录)
-    return f"https://{cdn_prefix}.douyinpic.com/aweme/100x100/aweme-avatar/{final_filename}?from=3067671334"
+    return f"https://{cdn_prefix}.douyinpic.com/aweme/1080x1080/aweme-avatar/{final_filename}?from=3067671334"
 
 
 def build_grade_icon(filename: str) -> str:

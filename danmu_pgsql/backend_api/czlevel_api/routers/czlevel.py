@@ -14,40 +14,50 @@ from backend_api.czlevel_api.routers.services import (
 logger = logging.getLogger("CzLevelAPI")
 router = APIRouter(tags=["czlevel"])
 
+# czlevel.py
 @router.post("/api/czlevel/batch")
 async def batch_check_cz_level(req: CzLevelBatchRequest, request: Request):
-    raw_targets = getattr(req, "targets", []) or []
-    targets = [str(t).strip() for t in raw_targets if str(t).strip()]
+    # 1. 干净地提取两个列表
+    targets = [str(t).strip() for t in req.targets if str(t).strip()]
+    user_ids = [str(u).strip() for u in req.user_ids if str(u).strip()]
 
-    if not targets: raise HTTPException(status_code=400, detail="查询参数不能为空")
-    if len(targets) > 100: raise HTTPException(status_code=400, detail="批量查询不能超过 100 条")
+    if not targets and not user_ids:
+        raise HTTPException(status_code=400, detail="查询参数 targets 和 user_ids 不能同时为空")
+        
+    if len(targets) + len(user_ids) > 100:
+        raise HTTPException(status_code=400, detail="批量查询总数不能超过 100 条")
 
     pool = get_db()
     redis = await get_redis()
     
     try: 
-        # 直接使用 targets (纯 display_id) 查库
-        db_records = await fetch_users_batch_from_db(pool, targets)
+        # 将两组数据同时传给底层进行一次性查询
+        db_records = await fetch_users_batch_from_db(pool, display_ids=targets, user_ids=user_ids)
     except Exception as e:
         logger.error(f"❌ 批量查库异常: {e}")
         db_records = {}
         
     final_response = []
     
-    for t in targets:
-        # 直接从精简后的字典取值
-        record = db_records.get(t) or db_records.get(t.lower())
+    # 将两种查询合并为元组进行统一处理 (类型, 查询值)
+    query_items = [("display_id", t) for t in targets] + [("user_id", u) for u in user_ids]
+    
+    for q_type, q_val in query_items:
+        record = db_records.get(q_val)
+        if not record and q_type == "display_id":
+            record = db_records.get(q_val.lower())
+            
         source = "database_only" if record else "not_found"
-
         level = 0
+        
         if record:
             raw_level = record['raw_cz_level']
             level = raw_level if raw_level is not None else 0
             final_response.append({
-                "query":      t,
+                "query":      q_val,
                 "user_id":    str(record.get('user_id', '')),  
                 "sec_uid":    record.get('sec_uid') or "",
-                "display_id": record.get('display_id') or t,
+                "display_id": record.get('display_id') or ("" if q_type=="user_id" else q_val),
                 "nickname":   record.get('user_name') or "未知用户",
                 "avatar":     build_avatar_url(record.get('avatar_url')),
                 "level":      level,
@@ -56,10 +66,10 @@ async def batch_check_cz_level(req: CzLevelBatchRequest, request: Request):
             })
         else:
             final_response.append({
-                "query":      t,
-                "user_id":    "",                              
+                "query":      q_val,
+                "user_id":    q_val if q_type == "user_id" else "",                              
                 "sec_uid":    "",
-                "display_id": t,  # 直接返回查询的目标 t
+                "display_id": q_val if q_type == "display_id" else "", 
                 "nickname":   "查无此人",
                 "avatar":     "",
                 "level":      0,
@@ -68,9 +78,13 @@ async def batch_check_cz_level(req: CzLevelBatchRequest, request: Request):
             })
 
         if level < 12:
-            # ✅ 维持原状：即使我们用 display_id 查库，只要库里有对应的 sec_uid，
-            # 这里依然会优先将 sec_uid 推送给后端的爬虫队列。
-            target_for_queue = record['sec_uid'] if (record and record.get('sec_uid')) else t
-            asyncio.create_task(push_to_update_queue(redis, target_for_queue, level))
+            if record and record.get('sec_uid'):
+                target_for_queue = record['sec_uid']
+                queue_type = "sec"
+            else:
+                target_for_queue = q_val
+                queue_type = "did" if q_type == "display_id" else "uid"
+            
+            asyncio.create_task(push_to_update_queue(redis, target_for_queue, level, queue_type))
 
     return {"results": final_response}

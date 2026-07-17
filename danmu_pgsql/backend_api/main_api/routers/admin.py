@@ -145,7 +145,7 @@ async def get_cache_stats():
 
 @router.get("/api/admin/settings", dependencies=[Depends(verify_admin)])
 async def get_system_settings():
-    """获取系统当前所有动态配置 (仅保留核心 3 项)"""
+    """获取系统当前所有动态配置"""
     redis = await get_redis()
     if not redis: 
         raise HTTPException(status_code=500, detail="Redis异常")
@@ -154,17 +154,19 @@ async def get_system_settings():
     legacy_api_switch = await redis.get("setting:czlevel_api_switch")
     shield_enable = await redis.get("setting:enable_zero_level_shield")
     shield_days = await redis.get("setting:active_shield_days")
+    uid_fetch = await redis.get("setting:enable_uid_network_fetch") # 👈 新增读取
     
     return {
         "single_api_switch": _to_int(single_api_switch, _to_int(legacy_api_switch, 1)),
         "enable_zero_level_shield": _to_bool(shield_enable, True),
         "active_shield_days": _to_int(shield_days, 3),
+        "enable_uid_network_fetch": _to_bool(uid_fetch, True), # 👈 新增返回
     }
 
 
 @router.post("/api/admin/settings", dependencies=[Depends(verify_admin)])
 async def update_system_settings(settings: SystemSettings):
-    """前端一键保存更新所有配置 (仅更新核心 3 项)"""
+    """前端一键保存更新所有配置"""
     redis = await get_redis()
     if not redis: 
         raise HTTPException(status_code=500, detail="Redis异常")
@@ -172,5 +174,7 @@ async def update_system_settings(settings: SystemSettings):
     await redis.set("setting:single_api_switch", str(settings.single_api_switch))
     await redis.set("setting:enable_zero_level_shield", "1" if settings.enable_zero_level_shield else "0")
     await redis.set("setting:active_shield_days", str(settings.active_shield_days))
+    # 👈 新增：写入布尔值为 1 或 0
+    await redis.set("setting:enable_uid_network_fetch", "1" if settings.enable_uid_network_fetch else "0") 
     
     return {"message": "系统核心配置已实时更新 ✅"}

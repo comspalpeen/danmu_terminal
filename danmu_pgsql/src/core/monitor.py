@@ -2,12 +2,14 @@
 import orjson as json
 import random
 import re
+import os
 import logging
 import asyncio
 import aiohttp
 from typing import List, Dict, Optional
 from datetime import datetime
 from src.db.db import AsyncPostgresHandler
+from src.utils.feishu_notifier import FeishuNotifier
 
 logger = logging.getLogger("Monitor")
 
@@ -24,11 +26,10 @@ class AsyncDouyinLiveMonitor:
         self.base_url = "https://www.douyin.com"
         self.current_cookie = None
         self.current_sec_user_id = None
-        is_phone_stream = False
         # 保存 DB 引用
         self.db = db
         self.session = None # 稍后在 init_session 中初始化
-
+        self.feishu = FeishuNotifier()
         self.headers = {
             'authority': 'www.douyin.com',
             'accept': 'application/json, text/plain, */*',
@@ -210,7 +211,7 @@ class AsyncDouyinLiveMonitor:
 
     async def get_all_live_users(self) -> List[Dict]:
         """
-        异步扫描所有关注用户
+        异步扫描所有关注用户，并集成了飞书智能通知状态机（含开播/连麦精准追踪及 Redis 防重复防重启轰炸）
         """
         live_users = []
         offset = 0
@@ -227,12 +228,48 @@ class AsyncDouyinLiveMonitor:
                 # 1. 异步保存/更新 Author 资料卡
                 await self._save_author_card(user)
 
-                # 2. 更新 Room 实时状态 (存库逻辑不变，status=2 也会存)
+                uid = user.get('uid')
+                nickname = user.get('nickname', '未知')
+                raw_status = user.get('live_status', 0)
+                
+                # 2. 动态解析当前房间信息，交付飞书状态机管理
+                if uid:
+                    target_room_id = ""
+                    target_web_rid = ""
+                    
+                    # 仅当处于直播(1)或连麦(2)状态时，尝试解析当前所在房间的真实数据
+                    if raw_status in [1, 2]:
+                        raw_room_data = user.get('room_data')
+                        if raw_room_data:
+                            try:
+                                room_data_dict = json.loads(raw_room_data)
+                                # 优先捕获连麦目标房间或本场房间的 room_id 和背后的 web_rid
+                                target_room_id = room_data_dict.get('id_str') or room_data_dict.get('room_id_str')
+                                target_web_rid = room_data_dict.get('owner', {}).get('web_rid')
+                            except Exception: 
+                                pass
+                        
+                        # 兜底：如果 room_data 解析失败，使用用户自身的一级字段补齐
+                        if not target_room_id:
+                            target_room_id = user.get('room_id_str')
+                        if not target_web_rid:
+                            target_web_rid = user.get('web_rid')
+
+                    # 始终触发通知检查：状态机内部会智能筛选：
+                    # 状态未改变时直接拦截；新开播/换场连麦时发送卡片；下播(0/4)时自动排空 Redis 缓存
+                    await self.feishu.check_and_notify(
+                        uid=uid,
+                        nickname=nickname,
+                        live_status=raw_status,
+                        room_id=str(target_room_id or ""),
+                        web_rid=target_web_rid or ""
+                    )
+
+                # 3. 更新 Room 实时状态（维持原有数据库逻辑不变）
                 if self.db:
                     follower_count = user.get('follower_count', 0)
-                    live_status = user.get('live_status', 0)
                     room_id = None
-                    if live_status == 1:
+                    if raw_status == 1:
                         room_id = user.get('room_id_str')
                     if not room_id and user.get('room_data'):
                         try:
@@ -241,11 +278,10 @@ class AsyncDouyinLiveMonitor:
                         except: pass
                     
                     if room_id:
-                        await self.db.update_room_realtime(str(room_id), live_status, follower_count)
+                        await self.db.update_room_realtime(str(room_id), raw_status, follower_count)
 
-                raw_status = user.get('live_status', 0)
-                
-                if raw_status == 1:  # 只允许 status=1 进入待录制列表
+                # 4. 过滤并提取录制流任务（只有 live_status == 1 允许进入待录制队列）
+                if raw_status == 1:  
                     live_info = self.extract_live_info(user)
                     
                     if live_info:
@@ -267,6 +303,7 @@ class AsyncDouyinLiveMonitor:
                             live_users.append(live_info)
                         else:
                             logger.warning(f"⚠️ [Monitor] 放弃任务 (无 web_rid): {live_info.get('nickname')}")
+            
             has_more = data.get('has_more', False)
             if not has_more:
                 break
@@ -284,7 +321,6 @@ class AsyncDouyinLiveMonitor:
             nickname = user_data.get('nickname')
             sec_uid = user_data.get('sec_uid')
             uid = user_data.get('uid')
-            signature = user_data.get('signature')
             live_status = user_data.get('live_status', 0)            
             avatar_url = ""
             try:
@@ -318,7 +354,6 @@ class AsyncDouyinLiveMonitor:
                 'sec_uid': sec_uid,
                 'uid': uid,
                 'avatar': avatar_url,
-                'signature': signature,
                 'live_status': live_status,
                 'web_rid': web_rid,
                 'user_count': user_count,
@@ -342,7 +377,6 @@ class AsyncDouyinLiveMonitor:
             live_status = user_data.get('live_status')
             room_data_dict = {}
             web_rid = None
-            is_phone_stream = False
             
             # 尝试解析 room_data
             raw_room_data = user_data.get('room_data')
@@ -351,13 +385,6 @@ class AsyncDouyinLiveMonitor:
                     room_data_dict = json.loads(raw_room_data)
                     # 路径 1: room_data -> owner -> web_rid
                     web_rid = room_data_dict.get('owner', {}).get('web_rid')
-                    
-                    if room_data_dict.get('live_type_normal') is True or room_data_dict.get('live_type_audio') is True:
-                        # 手机视频直播 或 手机语音直播，都打上手机端标签
-                        is_phone_stream = True
-                    elif room_data_dict.get('live_type_third_party') is True:
-                        # 电脑第三方 OBS 推流
-                        is_phone_stream = False
                         
                 except: pass
             
@@ -370,18 +397,14 @@ class AsyncDouyinLiveMonitor:
                 logger.warning(f"🕵️ [调试] 发现无 web_rid 样本: {nickname} (LiveStatus: {live_status})")
                 
                 if raw_room_data:
-                    # 打印完整的 room_data，方便你复制出来分析结构
                     logger.warning(f"📜 [调试] room_data 原始内容: {raw_room_data}")
-                    
-                    # 顺便帮你检查一下是否有疑似 ID 的其他字段
-                    # 有时候 id_str 其实就是 web_rid
                     candidate_id = room_data_dict.get('id_str')
                     if candidate_id:
                         logger.warning(f"💡 [提示] 发现 room_data.id_str: {candidate_id}，也许它是 web_rid？")
                 else:
-                    # 如果连 room_data 都没有，打印 user_data 的一级 Key，看看都有什么
                     keys_list = list(user_data.keys())
                     logger.warning(f"🈳 [调试] 该用户没有 room_data 字段！User Keys: {keys_list}")
+                    
             room_id = None
             if live_status == 1:
                 room_id = user_data.get('room_id_str')          
@@ -399,12 +422,10 @@ class AsyncDouyinLiveMonitor:
                 'live_status': live_status,
                 'room_id': room_id, 
                 'web_rid': web_rid, 
-                'is_phone_stream': is_phone_stream,
-                'title': user_data.get('signature', '')[:30],
+                'title': f"{user_data.get('nickname', '主播')}正在直播",
                 'follower_count': user_data.get('follower_count', 0),
                 'avatar_url': avatar_url,
                 'cover_url': avatar_url,
-                'title': f"{user_data.get('nickname', '主播')}正在直播"
             }
         except Exception as e:
             logger.error(f"❌ 解析直播信息异常: {e}")

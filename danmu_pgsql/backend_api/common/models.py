@@ -99,7 +99,7 @@ class DailyReportResponse(BaseModel):
     date: str
     items: List[DailyReportItem]
 class CzLevelBatchRequest(BaseModel):
-    targets: List[str]
+    targets: List[str] = []
     user_ids: list[str] = []
 
 class CzLevelResponse(BaseModel):
@@ -188,3 +188,4 @@ class SystemSettings(BaseModel):
     single_api_switch: int = 1
     enable_zero_level_shield: bool = True
     active_shield_days: int = 3
+    enable_uid_recheck: bool = True  # 👈 新增：UID 纯数字复查降级开关（默认开启）

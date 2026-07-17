@@ -12,18 +12,21 @@ type SystemSettingsPayload = {
   single_api_switch: number;
   enable_zero_level_shield: boolean;
   active_shield_days: number;
+  enable_uid_network_fetch: boolean; // 👈 新增
 };
 
 type SettingsFormState = {
   single_api_switch: number;
   enable_zero_level_shield: boolean;
   active_shield_days: number | "";
+  enable_uid_network_fetch: boolean; // 👈 新增
 };
 
 const DEFAULT_SETTINGS: SystemSettingsPayload = {
   single_api_switch: 1,
   enable_zero_level_shield: true,
   active_shield_days: 3,
+  enable_uid_network_fetch: true, // 👈 新增默认开启
 };
 
 const SINGLE_API_SWITCH_OPTIONS = [
@@ -68,6 +71,7 @@ export default function AdminSettingsPage() {
     single_api_switch: current.single_api_switch,
     enable_zero_level_shield: current.enable_zero_level_shield,
     active_shield_days: normalizeNumberField(current.active_shield_days, DEFAULT_SETTINGS.active_shield_days, 0),
+    enable_uid_network_fetch: current.enable_uid_network_fetch, // 👈 新增
   });
 
   const setNumericField = (field: NumericField, value: string) => {
@@ -97,16 +101,11 @@ export default function AdminSettingsPage() {
       if (res.ok) {
         const data: Partial<SystemSettingsPayload> = await res.json();
         setSettings({
-          single_api_switch: Number.isFinite(data.single_api_switch)
-            ? Number(data.single_api_switch)
-            : DEFAULT_SETTINGS.single_api_switch,
-          enable_zero_level_shield:
-            typeof data.enable_zero_level_shield === "boolean"
-              ? data.enable_zero_level_shield
-              : DEFAULT_SETTINGS.enable_zero_level_shield,
-          active_shield_days: Number.isFinite(data.active_shield_days)
-            ? Math.max(0, Number(data.active_shield_days))
-            : DEFAULT_SETTINGS.active_shield_days,
+          single_api_switch: Number.isFinite(data.single_api_switch) ? Number(data.single_api_switch) : DEFAULT_SETTINGS.single_api_switch,
+          enable_zero_level_shield: typeof data.enable_zero_level_shield === "boolean" ? data.enable_zero_level_shield : DEFAULT_SETTINGS.enable_zero_level_shield,
+          active_shield_days: Number.isFinite(data.active_shield_days) ? Math.max(0, Number(data.active_shield_days)) : DEFAULT_SETTINGS.active_shield_days,
+          // 👇 新增状态合并
+          enable_uid_network_fetch: typeof data.enable_uid_network_fetch === "boolean" ? data.enable_uid_network_fetch : DEFAULT_SETTINGS.enable_uid_network_fetch,
         });
         return true;
       }
@@ -272,7 +271,7 @@ export default function AdminSettingsPage() {
             <CardTitle className="text-xl font-bold">业务盾牌</CardTitle>
             <CardDescription>用于快速阻断高频或无效查询，减少资源浪费</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-6">
+         <CardContent className="space-y-6">
             <div className="flex flex-col gap-2 rounded-[var(--radius)] border border-border bg-muted/25 p-4 md:flex-row md:items-center md:justify-between">
               <div>
                 <p className="font-bold text-foreground">启用 0 级盾牌</p>
@@ -282,6 +281,19 @@ export default function AdminSettingsPage() {
                 checked={settings.enable_zero_level_shield}
                 onCheckedChange={(checked) => setSettings((prev) => ({ ...prev, enable_zero_level_shield: checked }))}
                 aria-label="enable-zero-level-shield"
+              />
+            </div>
+
+            {/* 👇 新增的纯 user_id 降级开关 */}
+            <div className="flex flex-col gap-2 rounded-[var(--radius)] border border-border bg-destructive/10 p-4 md:flex-row md:items-center md:justify-between">
+              <div>
+                <p className="font-bold text-foreground">允许纯 user_id 联网复查</p>
+                <p className="text-xs text-muted-foreground">关闭后将触发<strong className="text-destructive">降级熔断</strong>：缺乏 sec_uid 的低优查询将直接跳过网络抓取以保护代理池（高峰期推荐关闭）</p>
+              </div>
+              <Switch
+                checked={settings.enable_uid_network_fetch}
+                onCheckedChange={(checked) => setSettings((prev) => ({ ...prev, enable_uid_network_fetch: checked }))}
+                aria-label="enable-uid-network-fetch"
               />
             </div>
 

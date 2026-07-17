@@ -15,33 +15,34 @@ FEISHU_SECRET = "Xr6KUiiOJ8Ri6E9tCjyPrc"  # 如果飞书机器人安全设置没
 USER_OPEN_ID = "ou_7723fbb9a5eeef91572f78e3704fc3ff"   # 你的飞书 open_id，用于 @ 通知
 # ============================================
 
+# 策略阈值：可用额度大于多少时才认为是有意义的放额
+MIN_AVAILABLE_THRESHOLD = 100 
+# ============================================
+
 def gen_sign(secret: str, timestamp: int) -> str:
-    """飞书安全签名的生成逻辑"""
     string_to_sign = f'{timestamp}\n{secret}'
     hmac_code = hmac.new(string_to_sign.encode('utf-8'), digestmod=hashlib.sha256).digest()
-    sign = base64.b64encode(hmac_code).decode('utf-8')
-    return sign
+    return base64.b64encode(hmac_code).decode('utf-8')
 
-async def send_feishu_notification(quota: str, used: str, enabled: str):
-    """发送美化后的飞书富文本/Markdown通知"""
+async def send_feishu_notification(quota: int, used: int, available: int, enabled: str):
     timestamp = int(time.time())
     
-    # 构造飞书消息体 (使用 post 类型以支持高级格式和 @ 功能)
     payload = {
         "msg_type": "post",
         "content": {
             "post": {
                 "zh_cn": {
-                    "title": "🚨 陈泽网 - 注册额度扩张通知",
+                    "title": "🎉 陈泽网 - 检测到可注册额度！",
                     "content": [
                         [
-                            {"tag": "text", "text": "📋 状态监控："},
-                            {"tag": "text", "text": f"当前注册功能已{'开启' if enabled == 'true' else '关闭'}\n"}
+                            {"tag": "text", "text": "🔊 状态提醒："},
+                            {"tag": "text", "text": f"系统当前注册功能为 【{'开启' if enabled == 'true' else '关闭'}】\n"}
                         ],
                         [
-                            {"tag": "text", "text": "📈 额度变动：\n"},
-                            {"tag": "text", "text": f"  • 当前总额度: {quota}\n"},
-                            {"tag": "text", "text": f"  • 已使用额度: {used}\n"}
+                            {"tag": "text", "text": "📊 额度详情：\n"},
+                            {"tag": "text", "text": f"  • 🚀 当前可用名额: {available} (已开放)\n"},
+                            {"tag": "text", "text": f"  • 📦 平台总名额: {quota}\n"},
+                            {"tag": "text", "text": f"  • 📥 当前已使用: {used}\n"}
                         ],
                         [
                             {"tag": "text", "text": "⏰ 检测时间: "},
@@ -49,7 +50,7 @@ async def send_feishu_notification(quota: str, used: str, enabled: str):
                         ],
                         [
                             {"tag": "at", "user_id": USER_OPEN_ID},
-                            {"tag": "text", "text": " 请及时前往注册。"}
+                            {"tag": "text", "text": " 名额已刷新"}
                         ]
                     ]
                 }
@@ -62,7 +63,6 @@ async def send_feishu_notification(quota: str, used: str, enabled: str):
         payload["sign"] = gen_sign(FEISHU_SECRET, timestamp)
 
     headers = {"Content-Type": "application/json"}
-    
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(FEISHU_WEBHOOK_URL, json=payload, headers=headers) as resp:
@@ -72,17 +72,17 @@ async def send_feishu_notification(quota: str, used: str, enabled: str):
                 else:
                     print(f"[ERROR] 飞书发送失败: {result}")
         except Exception as e:
-            print(f"[ERROR] 推送飞书时发生异常: {e}")
+            print(f"[ERROR] 推送飞书异常: {e}")
 
 async def main():
-    headers = {
-        "apikey": API_KEY
-    }
+    headers = {"apikey": API_KEY}
     
-    # 标记是否已经通知过，避免额度大于6000时每30秒狂轰滥炸
-    has_notified = False
+    # 核心持久化状态控制：
+    # True 代表上一次检查时额度是充足的（不需要重复通知）
+    # False 代表上一次检查时处于“缺额度”状态，或者刚刚启动脚本
+    has_enough_quota = False 
     
-    print("🚀 陈泽网额度监控服务已启动...")
+    print("🚀 陈泽网普适性额度智能监控已启动...")
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -90,32 +90,32 @@ async def main():
                 async with session.get(SUPABASE_URL, headers=headers, timeout=10) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        
-                        # 解析字段
                         data_dict = {item["key"]: item["value"] for item in data}
-                        quota_str = data_dict.get("registration_quota", "0")
-                        used_str = data_dict.get("registration_used", "0")
+                        
+                        quota = int(data_dict.get("registration_quota", 0))
+                        used = int(data_dict.get("registration_used", 0))
                         enabled_str = data_dict.get("registration_enabled", "false")
                         
-                        current_quota = int(quota_str)
+                        # 计算当前可用差值
+                        available = quota - used
                         
-                        print(f"[{time.strftime('%H:%M:%S')}] 当前额度: {current_quota} | 已用: {used_str}")
+                        print(f"[{time.strftime('%H:%M:%S')}] 总额度: {quota} | 已用: {used} | 可用: {available}")
                         
-                        # 判断触发条件：额度大于 6000
-                        if current_quota > 6000:
-                            if not has_notified:
-                                await send_feishu_notification(quota_str, used_str, enabled_str)
-                                has_notified = True  # 状态置为已通知
+                        # 判断逻辑
+                        if available > MIN_AVAILABLE_THRESHOLD:
+                            # 只有从“没有额度(False)”变成“有额度”的瞬间，才触发通知
+                            if not has_enough_quota:
+                                await send_feishu_notification(quota, used, available, enabled_str)
+                                has_enough_quota = True  # 锁住状态，防止重复报警
                         else:
-                            # 如果额度回落或重置，可以恢复通知状态
-                            has_notified = False
+                            # 当可用额度消耗殆尽（低于阈值），重置状态，等待下一次扩容突变
+                            has_enough_quota = False
                             
                     else:
-                        print(f"[WARNING] 接口响应异常，状态码: {resp.status}")
+                        print(f"[WARNING] 接口异常，状态码: {resp.status}")
             except Exception as e:
-                print(f"[ERROR] 监控请求发生异常: {e}")
+                print(f"[ERROR] 请求发生异常: {e}")
             
-            # 每 30 秒轮询一次
             await asyncio.sleep(30)
 
 if __name__ == "__main__":

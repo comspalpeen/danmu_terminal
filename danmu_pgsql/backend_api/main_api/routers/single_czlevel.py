@@ -6,7 +6,7 @@ from backend_api.common.database import get_redis, get_db
 from backend_api.common.utils import build_avatar_url
 
 # 全部引入自 main_api 本地业务层
-from backend_api.main_api.routers.czlevel_services import (
+from backend_api.main_api.routers.single_czlevel_services import (
     get_dynamic_settings,
     fetch_user_record_from_db,
     evaluate_business_shields,

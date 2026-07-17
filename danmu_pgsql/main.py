@@ -60,12 +60,11 @@ async def start_recorder_task(web_rid, nickname, start_follower_count, db, gift_
     fetcher = None
     assigned_cookie = None
     try:
-        # 1. 启动前，向调度器申请名额
-        assigned_cookie = slot_manager.acquire_cookie()
+        # ✅ 修改点：传入 web_rid
+        assigned_cookie = slot_manager.acquire_cookie(web_rid)
         
         logger.info(f"🚀 [任务启动] {nickname} ({web_rid})")
         
-        # 2. 将分配好的 Cookie 明确传给 fetcher
         fetcher = AsyncDouyinLiveWebFetcher(
             live_id=web_rid,
             db=db,
@@ -73,7 +72,7 @@ async def start_recorder_task(web_rid, nickname, start_follower_count, db, gift_
             start_follower_count=start_follower_count,
             initial_state=monitor_data,
             session=session,
-            assigned_cookie=assigned_cookie  # <--- 新增参数
+            assigned_cookie=assigned_cookie
         )
         await fetcher.start()
         

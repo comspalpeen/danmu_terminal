@@ -495,7 +495,7 @@ class MessageHandler:
         if str(self.live_id) != "615189692839":
             return
         fans_level = user_info.get("fans_club_level", 0)
-        if fans_level >= 7:
+        if fans_level >= 1:
             uid = user_info.get("user_id")
             now = time.time()
             last_record_time = self.vip_users_cache.get(uid, 0)
