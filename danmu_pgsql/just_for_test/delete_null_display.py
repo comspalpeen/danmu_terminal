@@ -7,7 +7,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("DeadUserCleaner")
 
 # 替换为你的真实数据库连接串
-DSN = "postgresql://postgresql_admin:Woshinibaba7421@pgm-uf6z9o14bx45x9i5.pg.rds.aliyuncs.com:2077/dy_live_data" 
+DSN = "" 
 
 async def main():
     conn = await asyncpg.connect(DSN, command_timeout=None)
