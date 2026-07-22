@@ -27,17 +27,17 @@ async def init_pg():
     pool = await asyncpg.create_pool(
             dsn=PG_DSN, 
             min_size=5,            
-            max_size=20,
-            command_timeout=60,    
-            timeout=10,            
+            max_size=15,
+            command_timeout=2,    
+            timeout=3,            
             max_inactive_connection_lifetime=280, 
     )
     tieba_pool = await asyncpg.create_pool(
             dsn=TIEBA_PG_DSN, 
-            min_size=1,            
+            min_size=0,            
             max_size=2,
-            command_timeout=20,
-            timeout=15,            
+            command_timeout=2,
+            timeout=3,            
             max_inactive_connection_lifetime=280, 
     )
 

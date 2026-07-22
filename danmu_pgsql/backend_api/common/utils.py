@@ -41,7 +41,7 @@ async def get_ttwid(force_refresh=False) -> str:
     if ttwid and redis:
         try:
             # 维持原有的 2 小时缓存有效期
-            await redis.setex(cache_key, 7200, ttwid)
+            await redis.setex(cache_key, 10800, ttwid)
             logger.info(f"✅ [Searcher] 成功更新 ttwid 并写入 Redis: {ttwid[:10]}...")
         except Exception as e: 
             logger.error(f"[Redis Error] save ttwid failed: {e}")

@@ -495,7 +495,7 @@ class MessageHandler:
         if str(self.live_id) != "615189692839":
             return
         fans_level = user_info.get("fans_club_level", 0)
-        if fans_level >= 1:
+        if fans_level > 1:
             uid = user_info.get("user_id")
             now = time.time()
             last_record_time = self.vip_users_cache.get(uid, 0)
@@ -508,11 +508,34 @@ class MessageHandler:
         try:
             message = douyin_pb2.MemberMessage()
             message.ParseFromString(payload)
+            
             if message.HasField("user"):
-                user_info = extract_user_info(message.user, self.live_id)
+                user_obj = message.user
+                
+                # 1. 拦截隐身大佬 (mystery_man == 2 且 此时外层 id 往往被脱敏成了 111111)
+                if getattr(user_obj, "mystery_man", 0) == 2 and user_obj.id == 111111:
+                    try:
+                        # 2. 从入场特效中深挖真实的 user_id 和 sec_uid
+                        if message.HasField("enterEffectConfig") and message.enterEffectConfig.HasField("text"):
+                            for piece in message.enterEffectConfig.text.piecesList:
+                                if piece.HasField("userValue") and piece.userValue.HasField("user"):
+                                    real_user = piece.userValue.user
+                                    if real_user.id and real_user.id != 111111:
+                                        # 3. 动态修改当前内存中 user_obj 的属性 (Proto3 对象支持运行时赋值)
+                                        user_obj.id = real_user.id
+                                        if getattr(real_user, "secUid", ""):
+                                            user_obj.secUid = real_user.secUid
+                                        # logger.info(f"[Member] 隐身大佬身份还原成功 -> ID: {user_obj.id}, 保持原完整昵称: {user_obj.nickName}")
+                                        break
+                    except Exception as e:
+                        logger.warning(f"[Member] 尝试还原隐身用户真实ID失败: {e}")
+
+                # 4. 经过上面动态替换后，此时传入的 user 已经是带有“真实ID+完整昵称”的完美对象了
+                user_info = extract_user_info(user_obj, self.live_id)
                 await self._check_and_save_vip(user_info)
-        except Exception:
-            pass
+                
+        except Exception as e:
+            logger.error(f"解析 MemberMessage 异常: {e}", exc_info=True)
 
     async def _parse_fansclub(self, payload):
         try:

@@ -21,7 +21,6 @@ _thread_local = threading.local()
 
 def get_js_context(abogus_file_path='js/a_bogus.js'):
     """获取当前线程专属的 V8 引擎上下文"""
-    # 如果当前线程还没有引擎，就初始化一个
     if not hasattr(_thread_local, 'ctx'):
         ctx = py_mini_racer.MiniRacer()
         if os.path.exists(abogus_file_path):
