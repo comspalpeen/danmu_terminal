@@ -9,7 +9,7 @@ router = APIRouter(tags=["search"])
 @router.get("/api/search")
 async def search_site(q: str = Query(..., min_length=1), limit: int = 20):
     pool = get_db()
-    sql = "SELECT * FROM authors WHERE nickname ILIKE $1 OR common_name ILIKE $1 OR sec_uid = $2 ORDER BY weight DESC, follower_count DESC LIMIT $3"
+    sql = "SELECT * FROM authors WHERE nickname ILIKE $1 OR sec_uid = $2 ORDER BY weight DESC, follower_count DESC LIMIT $3"
     async with pool.acquire() as conn:
         rows = await conn.fetch(sql, f"%{q}%", q, limit)
         res = []

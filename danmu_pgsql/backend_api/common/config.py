@@ -7,10 +7,9 @@ load_dotenv(dotenv_path)
 
 # PostgreSQL 配置 
 PG_DSN = os.environ.get("PG_DSN")
-TIEBA_PG_DSN = os.environ.get("TIEBA_PG_DSN")
 
 REDIS_URL = os.environ.get("REDIS_URL")
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET")
 
-if not all([PG_DSN, TIEBA_PG_DSN, REDIS_URL, ADMIN_SECRET]):
+if not all([PG_DSN, REDIS_URL, ADMIN_SECRET]):
     raise ValueError("Missing required environment variables in .env file")

@@ -16,7 +16,7 @@ import logging
 import asyncio
 import aiohttp
 import re
-
+from config import TARGET_ANCHOR_ID
 from src.utils.ac_signature import get__ac_signature
 from src.db.redis_client import get_redis
 
@@ -232,7 +232,7 @@ def extract_filename(url: str) -> str:
     except Exception:
         return ""
         
-def extract_user_info(user, current_live_id=""):
+def extract_user_info(user, current_anchor_id=""):
     info = {
         "user_id": str(user.id),
         "user_name": user.nickName,
@@ -246,7 +246,7 @@ def extract_user_info(user, current_live_id=""):
         "fans_club_level": 0,
         "fans_club_icon": "",
         "fans_club_anchor_id": "", 
-        "is_mystery": (getattr(user, "mystery_man", 0) == 2),
+        "is_mystery": (getattr(user, "mystery_man", 0) == 2) or (str(user.id) == "111111"),
     }
 
     try:
@@ -278,9 +278,8 @@ def extract_user_info(user, current_live_id=""):
                     info["fans_club_icon"] = get_safe_url(badge)
     except Exception:
         pass
-
-    if str(current_live_id) == "615189692839":
-        if info.get("fans_club_anchor_id") == "63871524957":
+    if str(current_anchor_id) == TARGET_ANCHOR_ID:
+        if info.get("fans_club_anchor_id") == TARGET_ANCHOR_ID:
             info["cz_club_level"] = info.get("fans_club_level", 0)
         else:
             info["cz_club_level"] = 0

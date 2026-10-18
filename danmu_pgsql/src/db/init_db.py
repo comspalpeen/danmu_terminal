@@ -51,7 +51,6 @@ async def init_tables(pool):
     chats_ddl = """
     CREATE TABLE IF NOT EXISTS live_chats (
         id BIGSERIAL PRIMARY KEY,
-        web_rid VARCHAR(64),
         room_id VARCHAR(64) NOT NULL,
         user_id VARCHAR(64) NOT NULL,
         user_name VARCHAR(128),
@@ -68,7 +67,6 @@ async def init_tables(pool):
     gifts_ddl = """
     CREATE TABLE IF NOT EXISTS live_gifts (
         id BIGSERIAL PRIMARY KEY,
-        web_rid VARCHAR(64),
         room_id VARCHAR(64) NOT NULL,
         user_id VARCHAR(64) NOT NULL,
         user_name VARCHAR(128),
@@ -91,7 +89,6 @@ async def init_tables(pool):
     rooms_ddl = """
     CREATE TABLE IF NOT EXISTS rooms (
         room_id VARCHAR(64) PRIMARY KEY,
-        web_rid VARCHAR(64),
         title VARCHAR(255),
         user_id VARCHAR(64),
         sec_uid VARCHAR(255),
@@ -121,16 +118,14 @@ async def init_tables(pool):
     CREATE TABLE IF NOT EXISTS authors (
         sec_uid VARCHAR(255) PRIMARY KEY,
         uid VARCHAR(64),
-        web_rid VARCHAR(64),
-        self_web_rid VARCHAR(64),
+        unique_id VARCHAR(64),          -- 新增: 抖音号/短号
+        current_room_id VARCHAR(64),    -- 新增: 当前所在的房间号
         nickname VARCHAR(128),
         avatar VARCHAR(255),
         follower_count INTEGER DEFAULT 0,
         user_count INTEGER DEFAULT 0,
         live_status SMALLINT DEFAULT 0,
         weight INTEGER DEFAULT 0,
-        guild VARCHAR(128),
-        common_name VARCHAR(128),
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """
@@ -180,16 +175,6 @@ async def init_tables(pool):
     );
     """
 
-  #  check_presets_ddl = """
-  #  CREATE TABLE IF NOT EXISTS check_presets (
- #       sec_uid VARCHAR(255) PRIMARY KEY,
- #       nickname VARCHAR(128),
-  #      avatar_url VARCHAR(255),
-  #      "group" VARCHAR(64) DEFAULT '默认分组',
-  #      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  #  );
-  #  """
-
     site_qna_ddl = """
     CREATE TABLE IF NOT EXISTS site_qna (
         id SERIAL PRIMARY KEY,
@@ -210,20 +195,21 @@ async def init_tables(pool):
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """
+    
     high_level_fans_ddl = """
     CREATE TABLE IF NOT EXISTS high_level_fans (
-    user_id VARCHAR(64) PRIMARY KEY,
-    sec_uid VARCHAR(255),
-    display_id VARCHAR(128),
-    nickname VARCHAR(128),
-    avatar_url TEXT,
-    club_level SMALLINT DEFAULT 0,
-    intimacy BIGINT DEFAULT 0,
-    participate_time BIGINT DEFAULT 0,
-    pay_grade SMALLINT DEFAULT 0,
-    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+        user_id VARCHAR(64) PRIMARY KEY,
+        sec_uid VARCHAR(255),
+        display_id VARCHAR(128),
+        nickname VARCHAR(128),
+        avatar_url TEXT,
+        club_level SMALLINT DEFAULT 0,
+        intimacy BIGINT DEFAULT 0,
+        participate_time BIGINT DEFAULT 0,
+        pay_grade SMALLINT DEFAULT 0,
+        recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
     """
     try:
         async with pool.acquire() as conn:
@@ -237,7 +223,6 @@ async def init_tables(pool):
             await conn.execute(pk_history_ddl)
             await conn.execute(daily_reports_ddl)
             await conn.execute(favorite_streamers_ddl)
-           # await conn.execute(check_presets_ddl)
             await conn.execute(site_qna_ddl)
             await conn.execute(settings_cookies_ddl)
             await conn.execute(high_level_fans_ddl)
@@ -254,6 +239,7 @@ async def init_indexes(pool):
         "CREATE INDEX IF NOT EXISTS idx_chats_room_event_time ON live_chats (room_id, event_time DESC);",
         "CREATE INDEX IF NOT EXISTS idx_chats_event_time ON live_chats (event_time DESC);",
         "CREATE INDEX IF NOT EXISTS idx_chats_user_id ON live_chats (user_id);",
+        
         # 礼物表
         "CREATE INDEX IF NOT EXISTS idx_gifts_room_time ON live_gifts (room_id, created_at DESC);",
         "CREATE INDEX IF NOT EXISTS idx_gifts_created_at ON live_gifts (created_at DESC);",
@@ -278,14 +264,15 @@ async def init_indexes(pool):
         "CREATE INDEX IF NOT EXISTS idx_users_lower_user_name ON users (LOWER(user_name) varchar_pattern_ops);",
         
         # 日报表
-        "CREATE INDEX IF NOT EXISTS idx_daily_reports_uid_date ON daily_reports (uid, date DESC);"
+        "CREATE INDEX IF NOT EXISTS idx_daily_reports_uid_date ON daily_reports (uid, date DESC);",
+        
         #高等级表
         "CREATE INDEX IF NOT EXISTS idx_hlf_intimacy ON high_level_fans (intimacy DESC);",
-        "CREATE INDEX IF NOT EXISTS idx_hlf_sec_uid ON high_level_fans (sec_uid);"
-        #陈泽等级表
-        "CREATE INDEX cz_fans_last_active_time_idx ON public.cz_fans (last_active_time);",
-        "CREATE INDEX cz_fans_cz_club_level_idx ON public.cz_fans (cz_club_level);"
+        "CREATE INDEX IF NOT EXISTS idx_hlf_sec_uid ON high_level_fans (sec_uid);",
         
+        #陈泽等级表
+        "CREATE INDEX IF NOT EXISTS cz_fans_last_active_time_idx ON public.cz_fans (last_active_time);",
+        "CREATE INDEX IF NOT EXISTS cz_fans_cz_club_level_idx ON public.cz_fans (cz_club_level);"
     ]
     
     success_count = 0

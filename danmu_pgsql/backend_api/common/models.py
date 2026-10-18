@@ -19,10 +19,11 @@ class Author(BaseModel):
     nickname: str = "未知用户"
     weight: int = 3
     avatar: Optional[str] = None
-    signature: Optional[str] = None
+    #signature: Optional[str] = None
     live_status: int = 0
-    web_rid: Optional[str] = None
-    room_id: Optional[str] = None
+    #web_rid: Optional[str] = None
+    #room_id: Optional[str] = None
+    current_room_id: Optional[str] = None
     user_count: int = 0
     follower_count: int = 0
     class Config:

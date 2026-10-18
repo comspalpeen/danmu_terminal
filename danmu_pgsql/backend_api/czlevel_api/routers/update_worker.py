@@ -48,7 +48,7 @@ async def run_update_worker():
     
     while True:
         try:
-            tasks = await redis.zpopmin("czlevel:update_queue", count=1)
+            tasks = await redis.zpopmax("czlevel:update_queue", count=1)
             if not tasks:
                 await asyncio.sleep(5)
                 continue

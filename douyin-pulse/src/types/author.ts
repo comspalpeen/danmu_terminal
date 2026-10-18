@@ -7,6 +7,7 @@ export interface Author {
   live_status: number; 
   web_rid?: string;
   room_id?: string;
+  current_room_id?: string;
   user_count: number;
   follower_count: number;
 }

@@ -24,9 +24,10 @@ logger = logging.getLogger("fetcher")
 
 class AsyncDouyinLiveWebFetcher:
     
-    def __init__(self, live_id, db, gift_processor, start_follower_count=0, abogus_file='js/a_bogus.js', initial_state=None, session=None, assigned_cookie=None):
+    # 彻底移除了 live_id，改用 anchor_id 作为核心标识
+    def __init__(self, anchor_id, db, gift_processor, start_follower_count=0, abogus_file='js/a_bogus.js', initial_state=None, session=None, assigned_cookie=None):
 
-        self.live_id = live_id
+        self.anchor_id = str(anchor_id)
         self.start_follower_count = start_follower_count
         self.abogus_file = abogus_file
         self.db = db
@@ -52,9 +53,8 @@ class AsyncDouyinLiveWebFetcher:
             connector = aiohttp.TCPConnector(limit=100, use_dns_cache=True, ttl_dns_cache=300)
             self.session = aiohttp.ClientSession(headers=self.headers, connector=connector)
             self._own_session = True
-
+        self._has_updated_title = False # 新增：单次标题更新锁
     async def get_ttwid(self, force_refresh: bool = False):
-        """直接复用全局单例/Redis中的 ttwid"""
         if self.__ttwid and not force_refresh:
             return self.__ttwid
         
@@ -75,21 +75,20 @@ class AsyncDouyinLiveWebFetcher:
         return await asyncio.to_thread(_calc)
 
     async def start(self):
-        logger.info(f"🚀 启动抓取: {self.live_id}")
+        logger.info(f"🚀 启动抓取: UID {self.anchor_id}")
         self.running = True
         
         try:
             if not self.initial_state or not self.initial_state.get('room_id'):
-                logger.error(f"❌ [{self.live_id}] 缺少 initial_state 或 room_id，无法启动录制")
+                logger.error(f"❌ [UID:{self.anchor_id}] 缺少 initial_state 或 room_id，无法启动录制")
                 return
 
             self.current_room_id = str(self.initial_state['room_id'])
 
             room_info = {
-                'web_rid': self.live_id,
                 'room_id': self.current_room_id,
                 'title': self.initial_state.get('title') or f"{self.initial_state.get('nickname', '主播')}正在直播",
-                'user_id': str(self.initial_state.get('uid', '')),
+                'user_id': self.anchor_id,
                 'sec_uid': self.initial_state.get('sec_uid', ''),
                 'nickname': self.initial_state.get('nickname', '未知用户'),
                 'cover_url': self.initial_state.get('cover_url') or self.initial_state.get('avatar_url', ''),
@@ -107,20 +106,16 @@ class AsyncDouyinLiveWebFetcher:
                 await self.db.save_room_info(room_info)
 
             self.handler = MessageHandler(
-                live_id=self.live_id,
                 room_id=self.current_room_id,
                 db=self.db,
                 gift_processor=self.gift_processor,
-                anchor_id=str(self.initial_state.get('uid', ''))
+                anchor_id=self.anchor_id
             )
 
-           # 首次连接，并获取是否曾经成功连上过的状态
             connected_once = await self._connectWebSocket()
             
-            # 【核心逻辑】：如果曾经成功连接过，但循环退出了，且 running 仍为 True
-            # 说明不是由 MessageHandler 判定正常下播，而是遇到了异常网络闪断
             if connected_once and self.running:
-                logger.warning(f"⚡ [{self.live_id}] WebSocket 意外断开，触发一次瞬间重试...")
+                logger.warning(f"⚡ [UID:{self.anchor_id}] WebSocket 意外断开，触发一次瞬间重试...")
                 await asyncio.sleep(0.5)
                 await self._connectWebSocket()
             
@@ -168,63 +163,23 @@ class AsyncDouyinLiveWebFetcher:
                 if self.handler:
                     is_ended = await self.handler.handle(msg.method, msg.payload)
                     if is_ended:
-                        self.running = False  # 正常下播标志位，确保不会触发瞬间重试
+                        self.running = False  
                         await ws.close()
                         break
         except Exception: 
             pass
 
     async def _connectWebSocket(self) -> bool:
-        """
-        连接 WebSocket。
-        使用直播伴侣(webcast_mate)参数，提高连接稳定性。
-        返回 bool：如果在任何一种策略下成功进入了消息接收流，返回 True；全部策略彻底失败返回 False。
-        """
-        # 伴侣端设备特征参数
         device_id = "124697379617291"
         iid = "2169793716959872"
-        # 使用 datetime 获取当前毫秒级时间戳
         timestamp = str(int(datetime.now().timestamp() * 1000))
         
-        # 伴侣端专用的 User-Agent
         mate_user_agent = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) webcast_mate/12.9.3 Chrome/136.0.7103.59 "
             "Electron/36.4.0-rs.18.release.webcast.81 TTElectron/36.4.0-rs.18.release.webcast.81 Safari/537.36"
         )
     
-        # 构建伴侣端 ws 链接 (已移除所有 blackMsgList)
-        wss = (
-            "wss://webcast100-ws-web-lq.amemv.com/webcast/im/push/v2/?"
-            "live_id=1"
-            "&aid=2079"
-            f"&room_id={self.current_room_id}"
-            "&device_platform=windows"
-            "&device_type=windows"
-            f"&cursor=t-{timestamp}_r-1_d-1_u-1_h-1"
-            f"&internal_ext=internal_src%3Adim%7Cwss_push_room_id%3A{self.current_room_id}%7Cwss_push_did%3A{device_id}%7Cfirst_req_ms%3A{timestamp}%7Cfetch_time%3A{timestamp}%7Cseq%3A1%7Cwss_info%3A0-{timestamp}-0-0"
-            "&support_wrds=1"
-            "&resp_content_type=protobuf"
-            "&version_code=180800"
-            "&webcast_sdk_version=1.0.15"
-            "&identity=audience"
-            "&last_rtt=558"
-            f"&device_id={device_id}"
-            "&ac=wifi"
-            f"&iid={iid}"
-            "&whitelist[0]=WebcastLinkMessage"
-            "&whitelist[1]=WebcastLinkMicMethod"
-            "&workerBlackMsgMode=2"
-            "&perfDecodeThresholdMs=50"
-            "&perfSetMsgRttThresholdMs=300"
-            "&update_version_code=1.0.15"
-            "&compress=gzip"
-        )
-    
-        signature = generateSignature(wss)
-        if signature:
-            wss += f"&signature={signature}"
-        
         strategies = []
         if self.assigned_cookie:
             mode_name = "Assigned Cookie"
@@ -238,22 +193,57 @@ class AsyncDouyinLiveWebFetcher:
                     "User-Agent": mate_user_agent,
                     "Origin": "file://"
                 },
-                "max_retries": 3  
+                "max_retries": 3,
+                "identity": "anchor"  # 真实cookie分配 anchor 身份
             })
         else:
-            logger.warning(f"⚠️ [{self.live_id}] 未获得真实 Cookie 额度，触发无登录态降级")
+            logger.warning(f"⚠️ [UID:{self.anchor_id}] 未获得真实 Cookie 额度，触发无登录态降级")
 
-        # 降级兜底项
         strategies.append({
             "name": "Fallback(TTWID)",
             "is_fallback": True,
-            "max_retries": 1  
+            "max_retries": 1,
+            "identity": "audience"  # 游客降级分配 audience 身份
         })
 
         try:
             for strategy in strategies:
                 mode_name = strategy['name']
                 max_retries = strategy.get('max_retries', 1)
+                current_identity = strategy.get('identity', 'audience') # 获取当前策略身份
+
+                # 根据当前策略动态拼接对应的 WSS 链接
+                wss = (
+                    "wss://webcast100-ws-web-lq.amemv.com/webcast/im/push/v2/?"
+                    "live_id=1"
+                    "&aid=2079"
+                    f"&room_id={self.current_room_id}"
+                    "&device_platform=windows"
+                    "&device_type=windows"
+                    f"&cursor=t-{timestamp}_r-1_d-1_u-1_h-1"
+                    f"&internal_ext=internal_src%3Adim%7Cwss_push_room_id%3A{self.current_room_id}%7Cwss_push_did%3A{device_id}%7Cfirst_req_ms%3A{timestamp}%7Cfetch_time%3A{timestamp}%7Cseq%3A1%7Cwss_info%3A0-{timestamp}-0-0"
+                    "&support_wrds=1"
+                    "&resp_content_type=protobuf"
+                    "&version_code=180800"
+                    "&webcast_sdk_version=1.0.15"
+                    f"&identity={current_identity}"  # 动态应用 identity 参数
+                    "&last_rtt=558"
+                    f"&device_id={device_id}"
+                    "&ac=wifi"
+                    f"&iid={iid}"
+                    "&whitelist[0]=WebcastLinkMessage"
+                    "&whitelist[1]=WebcastLinkMicMethod"
+                    "&workerBlackMsgMode=2"
+                    "&perfDecodeThresholdMs=50"
+                    "&perfSetMsgRttThresholdMs=300"
+                    "&update_version_code=1.0.15"
+                    "&compress=gzip"
+                )
+            
+                # 重新计算带有正确 identity 的 signature
+                signature = generateSignature(wss)
+                if signature:
+                    wss += f"&signature={signature}"
 
                 if strategy.get('is_fallback'):
                     ttwid = await self.get_ttwid()
@@ -267,11 +257,10 @@ class AsyncDouyinLiveWebFetcher:
 
                 for attempt in range(max_retries):
                     try:
-                        # 已移除 ssl=False，恢复默认的安全策略
                         async with self.session.ws_connect(wss, headers=headers, timeout=15) as ws:
                             self.ws = ws
                             retry_msg = f" (第{attempt+1}次尝试)" if attempt > 0 else ""
-                            logger.info(f"✅ WebSocket 连接成功 [{mode_name}]{retry_msg}")
+                            logger.info(f"✅ WebSocket 连接成功 [{mode_name} | {current_identity}]{retry_msg}")
                             
                             asyncio.create_task(self._update_real_title_once())
                             hb_task = asyncio.create_task(self._sendHeartbeat(ws))
@@ -303,13 +292,17 @@ class AsyncDouyinLiveWebFetcher:
                             logger.warning(f"❌ 策略 [{mode_name}] {max_retries} 次连接均失败，降级下一个策略... 最终原因: {e}")
                         continue 
 
-            logger.error(f"❌ 所有 WebSocket 连接策略均失败: {self.live_id}")
+            logger.error(f"❌ 所有 WebSocket 连接策略均失败: {self.anchor_id}")
             return False
             
         finally:
             if self.ws and not self.ws.closed:
                 await self.ws.close()
+
     async def _update_real_title_once(self):
+        if self._has_updated_title: 
+            return # 如果已经更新过，直接拦截
+            
         try:
             url = "https://live.douyin.com/webcast/room/info_by_scene/"
             params = {
@@ -328,5 +321,7 @@ class AsyncDouyinLiveWebFetcher:
                         await conn.execute(sql, title, self.current_room_id)
                     nickname = self.initial_state.get('nickname', '未知用户')
                     logger.info(f"✅ [标题更新] {nickname}: {title}")
+                    
+                    self._has_updated_title = True # 新增：成功更新后永久上锁
         except Exception as e:
             logger.error(f"❌ 获取真实标题异常: {e}")

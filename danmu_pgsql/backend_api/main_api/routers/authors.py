@@ -12,15 +12,8 @@ async def get_authors():
     pool = get_db()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT a.*, live_room.room_id
+            SELECT a.*
             FROM authors a
-            LEFT JOIN LATERAL (
-                SELECT r.room_id
-                FROM rooms r
-                WHERE r.user_id = a.uid AND r.live_status = 1
-                ORDER BY r.created_at DESC
-                LIMIT 1
-            ) live_room ON TRUE
             ORDER BY a.weight ASC, a.user_count DESC, a.follower_count DESC
         """)
         res = []

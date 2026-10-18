@@ -30,7 +30,7 @@ const AuthorCard: React.FC<AuthorCardProps> = ({ author }) => {
         e.preventDefault(); 
         if (author.live_status === 1 || author.live_status === 2) {
             // 直播中或连麦中，跳转直播间
-            openDouyinLiveRoom({ roomId: author.room_id, webRid: author.web_rid });
+            openDouyinLiveRoom({ currentRoomId: author.current_room_id });
         } else {
             // live_status === 0 或其他状态，跳转用户主页
             openDouyinUser(author.sec_uid);

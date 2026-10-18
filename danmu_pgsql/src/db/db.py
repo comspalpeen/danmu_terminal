@@ -8,7 +8,8 @@ import asyncpg
 from src.db.redis_client import get_redis
 from src.utils.fetcher_utils import extract_filename
 import hashlib
-
+from config import PG_DSN
+from config import TARGET_ANCHOR_ID
 logger = logging.getLogger("DB")
 
 def to_dt(ts):
@@ -22,7 +23,6 @@ def to_dt(ts):
 class AsyncPostgresHandler:
     def __init__(self, dsn=None):
         if not dsn:
-            from config import PG_DSN
             dsn = PG_DSN
         self.dsn = dsn
         self.pool = None
@@ -111,12 +111,14 @@ class AsyncPostgresHandler:
     def _get_user_fingerprint(self, uid, sec_uid, display_id, user_name, gender, pay_grade, avatar_url, is_mystery=False):
         raw = f"{uid}_{sec_uid}_{display_id}_{user_name}_{gender}_{pay_grade}_{avatar_url}_{is_mystery}"
         return hashlib.md5(raw.encode('utf-8')).hexdigest()
+        
     async def process_light_stick(self, data: dict):
         data['_is_light_stick'] = True
         await self.insert_gift(data)
 
     async def insert_gift(self, data: dict): await self._insert_buffer('gift', data)
     async def insert_chat(self, data: dict): await self._insert_buffer('chat', data)
+    
     async def _insert_buffer(self, data_type: str, data: dict):
         """统一处理 Chat 和 Gift 的缓冲、计数与触发机制"""
         if not data or self._shutting_down: return
@@ -166,7 +168,7 @@ class AsyncPostgresHandler:
                 break
             
             users_batch, specific_batch, room_updates = {}, [], {}
-            raw_cz_fans = {} # 暂存本批次所有陈泽直播间活跃粉丝
+            raw_cz_fans = {} # 暂存本批次所有专属直播间活跃粉丝
             
             # ================= 1. 数据解析层 =================
             for idx, raw in enumerate(raw_data_list):
@@ -175,11 +177,13 @@ class AsyncPostgresHandler:
                     data = orjson.loads(raw)
                     uid = data.get('user_id')
                     room_id = data.get('room_id')
-                    web_rid = data.get('web_rid', '')
+                    anchor_id = data.get('anchor_id', '') # 使用 anchor_id 代替 web_rid 进行逻辑判断
+                    
                     if not uid or not room_id: continue
             
                     is_light_stick = data.get('_is_light_stick', False)
-                    if is_light_stick and str(web_rid) != "615189692839":
+                    # 将原先 web_rid 的特判改为 anchor_id
+                    if is_light_stick and str(anchor_id) != TARGET_ANCHOR_ID:
                         if room_id not in room_updates: room_updates[room_id] = {'diamond': 0, 'ticket': 0}
                         room_updates[room_id]['ticket'] += 1
                         room_updates[room_id]['diamond'] += data.get('diamond_count', 0)
@@ -192,26 +196,17 @@ class AsyncPostgresHandler:
                     current_pay = data.get('pay_grade', 0)
                     current_cz_level = data.get('cz_club_level', 0)
                     
-                    # ====== 新增：提取判断特征 ======
                     uid_str = str(uid)
                     user_name = data.get('user_name', '')
                     display_id = data.get('display_id', '')
                     is_mystery = data.get('is_mystery', False)
                     is_restored_mystery = data.get('_is_restored_mystery', False)
                     
-                    # 判断是否为 dou 匿名用户 (纯字符串判断，极速且无需导包)
                     is_dou_user = bool(user_name.lower().startswith('dou') and user_name[3:].isdigit())
-                    
-                    # 判断是否为资料不全的神秘人 (只拥有 sec_uid 和 user_id，缺少 display_id)
                     is_incomplete_mystery = (is_mystery or is_restored_mystery) and not display_id
             
                     # ====== 核心拦截更新 ======
-                    # 1. 过滤 111111 幽灵用户
-                    # 2. 过滤 dou1234567 匿名用户
-                    # 3. 过滤缺少 display_id 的残缺神秘人
-                    # (结论：成功还原且拥有 display_id 的神秘人，将长驱直入写入 users 表！)
                     if uid_str != "111111" and not is_dou_user and not is_incomplete_mystery:
-                        # 1. 统一构建全站用户字典
                         existing_user = users_batch.get(uid)
                         if existing_user:
                             current_pay = max(current_pay, existing_user[5]) 
@@ -228,8 +223,8 @@ class AsyncPostgresHandler:
                             is_mystery 
                         )
             
-                        # 2. 收集陈泽房间活跃者
-                        if str(web_rid) == "615189692839":
+                        # 2. 收集专属房间活跃者 (依赖 anchor_id)
+                        if str(anchor_id) == TARGET_ANCHOR_ID:
                             existing_fan = raw_cz_fans.get(uid)
                             if existing_fan:
                                 current_cz_level = max(current_cz_level, existing_fan[1]) 
@@ -243,11 +238,11 @@ class AsyncPostgresHandler:
                         combo_count = data.get('combo_count', 1)
                         group_count = data.get('group_count', 1)
                         total_diamond = data.get('total_diamond_count') or (diamond_count * combo_count * group_count)
-                        # 保证即使是陈泽直播间的灯牌（用来更新等级后），也不计入 live_gifts 明细表
+                        
                         if not is_light_stick:
                             specific_batch.append((
-                                web_rid, room_id, uid, data.get('user_name', ''), 
-                                data.get('to_user_id', ''),  # 写入接收方的真实 uid
+                                room_id, uid, data.get('user_name', ''), 
+                                data.get('to_user_id', ''), 
                                 data.get('gift_id', ''), data.get('gift_name', ''), 
                                 clean_gift_icon, diamond_count, combo_count, group_count, total_diamond,
                                 data.get('pay_grade', 0), clean_pay_icon, data.get('fans_club_level', 0), clean_fans_icon, 
@@ -263,7 +258,7 @@ class AsyncPostgresHandler:
                             
                     elif data_type == 'chat':
                         specific_batch.append((
-                            web_rid, room_id, uid, data.get('user_name', ''), data.get('content', ''), 
+                            room_id, uid, data.get('user_name', ''), data.get('content', ''), 
                             data.get('pay_grade', 0), clean_pay_icon, data.get('fans_club_level', 0), clean_fans_icon, 
                             to_dt(data.get('event_time')), to_dt(data.get('created_at'))
                         ))
@@ -279,19 +274,15 @@ class AsyncPostgresHandler:
                 cz_fans_batch = {}
                 cz_active_cache_updates = {}
                 
-                # 2.1 智能 2 小时节流阀 (支持等级跃迁检测)
                 if raw_cz_fans:
                     redis_keys = [f"cz_active:{uid}" for uid in raw_cz_fans.keys()]
                     try: 
-                        # 批量获取缓存中的历史等级
                         active_levels = await redis_client.mget(redis_keys)
                     except Exception: 
                         active_levels = [None] * len(redis_keys)
                     
                     for idx, (uid, fan_tuple) in enumerate(raw_cz_fans.items()):
-                        current_level = fan_tuple[1] # 本次抓取到的最新等级
-                        
-                        # 解析缓存中的等级（如果没缓存则为 -1）
+                        current_level = fan_tuple[1] 
                         cached_val = active_levels[idx]
                         try:
                             cached_level = int(cached_val) if cached_val is not None else -1
@@ -299,10 +290,8 @@ class AsyncPostgresHandler:
                             cached_level = -1
                         if cached_level == -1 or current_level > cached_level: 
                             cz_fans_batch[uid] = fan_tuple
-                            # 把最新的等级存入 Redis，并重新开始 2 小时计时
                             cz_active_cache_updates[f"cz_active:{uid}"] = str(current_level).encode('utf-8')
                             
-                # 2.2 全局画像防抖 Hash 过滤
                 users_to_update, hashes_to_cache = [], {}
                 if users_batch:
                     redis_keys = [f"user:hash:{uid}" for uid in users_batch.keys()]
@@ -320,22 +309,19 @@ class AsyncPostgresHandler:
                 try:
                     async with self.pool.acquire() as conn:
                         async with conn.transaction():
-                            # 3.1 写入/更新全局 users
                             if users_to_update:
                                 await conn.executemany(self.UPSERT_USERS_SQL, sorted(users_to_update, key=lambda x: x[0]))
 
-                            # 3.2 写入/更新极简版 cz_fans
                             if cz_fans_batch:
                                 await conn.executemany(self.UPSERT_CZ_FANS_SQL, sorted(cz_fans_batch.values(), key=lambda x: x[0]))
 
-                            # 3.3 根据类型路由具体流数据插入
                             if data_type == 'gift':
                                 if specific_batch:
                                     await conn.executemany("""
-                                        INSERT INTO live_gifts (web_rid, room_id, user_id, user_name, to_user_id, gift_id, gift_name, gift_icon,
+                                        INSERT INTO live_gifts (room_id, user_id, user_name, to_user_id, gift_id, gift_name, gift_icon,
                                         diamond_count, combo_count, group_count, total_diamond_count, pay_grade, pay_grade_icon, 
                                         fans_club_level, fans_club_icon, send_time, created_at) 
-                                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18);
+                                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17);
                                     """, specific_batch)
                                 if room_updates:
                                     room_update_params = [(v['ticket'], v['diamond'], k) for k, v in sorted(room_updates.items(), key=lambda x: x[0])]
@@ -346,9 +332,9 @@ class AsyncPostgresHandler:
                             elif data_type == 'chat':
                                 if specific_batch:
                                     await conn.executemany("""
-                                        INSERT INTO live_chats (web_rid, room_id, user_id, user_name, content, pay_grade, pay_grade_icon, 
+                                        INSERT INTO live_chats (room_id, user_id, user_name, content, pay_grade, pay_grade_icon, 
                                         fans_club_level, fans_club_icon, event_time, created_at) 
-                                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
+                                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
                                     """, specific_batch)
                                 if room_updates:
                                     room_chat_params = [(v, k) for k, v in sorted(room_updates.items(), key=lambda x: x[0])]
@@ -357,12 +343,11 @@ class AsyncPostgresHandler:
                                         room_chat_params
                                     )
                     
-                    # 3.4 事务提交成功，批量刷新 Redis 状态标记
                     if hashes_to_cache or cz_active_cache_updates:
                         try:
                             pipe = redis_client.pipeline()
-                            for k, v in hashes_to_cache.items(): pipe.set(k, v, ex=259200) # 基础信息 Hash 保存 7 天
-                            for k, v in cz_active_cache_updates.items(): pipe.set(k, v, ex=7200) # 活跃期节流保存 2 小时
+                            for k, v in hashes_to_cache.items(): pipe.set(k, v, ex=259200) 
+                            for k, v in cz_active_cache_updates.items(): pipe.set(k, v, ex=7200) 
                             await pipe.execute()
                         except Exception: pass
                     
@@ -403,10 +388,10 @@ class AsyncPostgresHandler:
             except Exception as e:
                 logger.error(f"❌ [DB] 维护 {data_type} 备份队列异常: {e}")
                 break
+                
     async def save_room_info(self, data: dict):
         if not data or 'room_id' not in data: return
         room_id = data.get('room_id')
-        web_rid = data.get('web_rid', '')
         title = data.get('title', '')
         if title and len(title) > 255: title = title[:250] + "..."
             
@@ -422,16 +407,16 @@ class AsyncPostgresHandler:
         start_follower_count = data.get('start_follower_count', 0)
         
         sql = """
-            INSERT INTO rooms (room_id, web_rid, title, user_id, sec_uid, nickname, avatar_url, live_status, room_status, start_follower_count)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9)
+            INSERT INTO rooms (room_id, title, user_id, sec_uid, nickname, avatar_url, live_status, room_status, start_follower_count)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8)
             ON CONFLICT (room_id) DO UPDATE SET
-                web_rid = EXCLUDED.web_rid, title = EXCLUDED.title, nickname = EXCLUDED.nickname,
+                title = EXCLUDED.title, nickname = EXCLUDED.nickname,
                 avatar_url = EXCLUDED.avatar_url, live_status = EXCLUDED.live_status, room_status = EXCLUDED.room_status,
                 updated_at = CURRENT_TIMESTAMP;
         """
         try:
             async with self.pool.acquire() as conn:
-                await conn.execute(sql, room_id, web_rid, title, user_id, sec_uid, nickname, avatar_url, live_status, start_follower_count)
+                await conn.execute(sql, room_id, title, user_id, sec_uid, nickname, avatar_url, live_status, start_follower_count)
         except Exception as e:
             logger.error(f"❌ [DB] 保存直播间信息失败: {e}")
 
@@ -495,8 +480,6 @@ class AsyncPostgresHandler:
             if nickname and len(nickname) > 128: nickname = nickname[:128]
             
             avatar = extract_filename(data.get('avatar', ''))
-            web_rid = data.get('web_rid', '')
-            self_web_rid = data.get('self_web_rid', '')
             live_status = data.get('live_status', 0)
             weight = data.get('weight', 0)
             user_count = data.get('user_count', 0)
@@ -505,13 +488,11 @@ class AsyncPostgresHandler:
             current_room_id = str(data.get('current_room_id', '') or '')[:64]
             
             sql = """
-                INSERT INTO authors (sec_uid, uid, unique_id, web_rid, self_web_rid, nickname, avatar, follower_count, live_status, weight, user_count, current_room_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                INSERT INTO authors (sec_uid, uid, unique_id, nickname, avatar, follower_count, live_status, weight, user_count, current_room_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 ON CONFLICT (sec_uid) DO UPDATE SET
                     uid = EXCLUDED.uid, 
                     unique_id = COALESCE(NULLIF(EXCLUDED.unique_id, ''), authors.unique_id),
-                    web_rid = EXCLUDED.web_rid, 
-                    self_web_rid = COALESCE(NULLIF(EXCLUDED.self_web_rid, ''), authors.self_web_rid),
                     nickname = EXCLUDED.nickname, avatar = EXCLUDED.avatar, 
                     follower_count = EXCLUDED.follower_count, live_status = EXCLUDED.live_status, 
                     weight = EXCLUDED.weight, user_count = EXCLUDED.user_count,
@@ -524,8 +505,6 @@ class AsyncPostgresHandler:
                     sec_uid, 
                     data.get('uid'), 
                     unique_id, 
-                    web_rid, 
-                    self_web_rid, 
                     nickname, 
                     avatar, 
                     data.get('follower_count', 0), 
@@ -655,11 +634,10 @@ class AsyncPostgresHandler:
             return zombie_ids
         except Exception: return []
 
-    async def upsert_vip_user(self, user_info: dict, web_rid: str = ""):
+    async def upsert_vip_user(self, user_info: dict, anchor_id: str = ""):
         if not user_info or not user_info.get('user_id') or self._shutting_down: return
         uid = user_info['user_id']
         
-        # ====== 新增：全局对齐过滤规则 ======
         uid_str = str(uid)
         user_name = user_info.get('user_name', '')
         display_id = user_info.get('display_id', '')
@@ -668,16 +646,13 @@ class AsyncPostgresHandler:
         is_dou_user = bool(user_name.lower().startswith('dou') and user_name[3:].isdigit())
         is_incomplete_mystery = is_mystery and not display_id
     
-        # 拦截幽灵、匿名、残缺神秘人
         if uid_str == "111111" or is_dou_user or is_incomplete_mystery:
             return
-        # ==================================
             
         current_cz_level = user_info.get('cz_club_level', 0)
         
         try:
             redis_client = get_redis()
-            # 防线 1：判断专属活跃等级是否突破 (升级检测)
             cache_key = f"cz_active:{uid}"
             try:
                 cached_val = await redis_client.get(cache_key)
@@ -685,15 +660,15 @@ class AsyncPostgresHandler:
             except (ValueError, TypeError):
                 cached_level = -1
                 
-            # 只有在陈泽房间，且 (从来没记录过 OR 发生了升级) 才允许写粉丝表
-            is_cz_room = str(web_rid) == "615189692839" or current_cz_level > 0
+            # 使用 anchor_id 代替 web_rid 进行专属房间判断
+            is_cz_room = str(anchor_id) == TARGET_ANCHOR_ID or current_cz_level > 0
             needs_cz_update = is_cz_room and (cached_level == -1 or current_cz_level > cached_level)
-            # 防线 2：判断全局画像是否变化 (Hash 防抖)
+            
             clean_avatar = extract_filename(user_info.get('avatar_url', ''))
             current_hash = self._get_user_fingerprint(
                 uid, user_info.get('sec_uid', ''), user_info.get('display_id', ''),
                 user_info.get('user_name', ''), user_info.get('gender', 0), 
-                user_info.get('pay_grade', 0), clean_avatar, is_mystery # 补上参数
+                user_info.get('pay_grade', 0), clean_avatar, is_mystery
             )
             hash_key = f"user:hash:{uid}"
             try:
@@ -705,7 +680,7 @@ class AsyncPostgresHandler:
             needs_global_update = (current_hash != old_hash)
             if not needs_cz_update and not needs_global_update:
                 return
-            # 💾 按需双写并更新缓存
+                
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
                     if needs_global_update:
@@ -716,7 +691,6 @@ class AsyncPostgresHandler:
 
                     if needs_cz_update:
                         await conn.execute(self.UPSERT_CZ_FANS_SQL, uid, current_cz_level)
-                        # 安全地将更高的等级打入缓存
                         try: await redis_client.setex(cache_key, 7200, str(current_cz_level))
                         except: pass
 

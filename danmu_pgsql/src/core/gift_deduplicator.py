@@ -193,7 +193,7 @@ class AsyncGiftDeduplicator:
                 is_mystery = data_to_write.get('is_mystery', False)
                 
                 # 路由判断：如果是脱敏的神秘人，送到慢速解析队列处理；否则直入数据库
-                if (uid == '111111' or is_mystery) and is_mystery:
+                if uid == '111111' or is_mystery:
                     await self.mystery_resolver.add_task(data_to_write)
                 else:
                     await self.db.insert_gift(data_to_write)

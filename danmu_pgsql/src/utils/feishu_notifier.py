@@ -103,15 +103,22 @@ class FeishuNotifier:
         
         app_deep_link = f"snssdk1128://webcast_room?room_id={room_id}"
 
-        # 动态设置标题
+        # 动态设置标题与内容
         if live_status == 1:
             card_title = f"🟢 {nickname} 开播中"
             theme_color = "green"
             status_text = "正在直播中"
+            bottom_text = "开饭啦！"
         elif live_status == 2:
             card_title = f"{nickname} 连麦中"
             theme_color = "blue"
             status_text = "正在连麦中"
+            bottom_text = "开饭啦！"
+        elif live_status == 3:
+            card_title = f"🎙️ {nickname} 跨房连线中"
+            theme_color = "purple"  # 用紫色区分跨房抓包雷达
+            status_text = f"正在其他直播间连线 (Room: {room_id})"
+            bottom_text = "逮到跨房连麦啦！"
         else:
             return False
 
@@ -130,11 +137,10 @@ class FeishuNotifier:
                             "content": f"**主播**：{nickname}\n**UID**：{uid}\n**状态**：{status_text}\n**时间**：{start_time_str}\n\n 🔗 [点击进入直播间]({app_deep_link})"
                         }
                     },
-                    # 在此处移除了原有的 button action (使用浏览器打开)
                     {"tag": "hr"},
                     {
                         "tag": "div",
-                        "text": {"tag": "lark_md", "content": f"<at id=\"{self.open_id}\"></at> 开饭啦！"}
+                        "text": {"tag": "lark_md", "content": f"<at id=\"{self.open_id}\"></at> {bottom_text}"}
                     }
                 ]
             }
@@ -180,3 +186,40 @@ class FeishuNotifier:
         except Exception as e:
             logger.error(f"❌ [飞书] 静默通知请求异常: {e}")
             return False
+    async def check_guest_mic_and_notify(self, target_uid: str, current_room_id: str, target_name: str = "陈泽"):
+        """
+        跨房连麦检测与通知逻辑（已完全脱离 web_rid）
+        """
+        if not self.webhook_url:
+            return
+
+        try:
+            redis_client = get_redis()
+            if not redis_client:
+                return
+
+            # 1. 查验本尊开播状态：如果该主播自己正在开播（说明是正常的PK），则不通知
+            own_state_key = f"feishu:state:{target_uid}"
+            own_state = await redis_client.get(own_state_key)
+            if own_state and own_state.decode('utf-8') == "1":
+                return
+
+            # 2. 房间级防抖：同一目标、在同一房间，设定 1 小时 (3600秒) 内只触发一次
+            lock_key = f"feishu:guest_lock:{target_uid}:{current_room_id}"
+            is_first_time = await redis_client.set(lock_key, "1", nx=True, ex=3600)
+            
+            if not is_first_time:
+                return
+
+            # 3. 满足所有条件，直接复用交互式卡片发送通知（传入 status=3）
+            success = await self._send_interactive_card(
+                uid=target_uid,
+                nickname=target_name,
+                live_status=3,
+                room_id=current_room_id
+            )
+            if success:
+                logger.info(f"✅ [连麦雷达] 成功触发 {target_name} 跨房连麦通知 (Room ID: {current_room_id})")
+
+        except Exception as e:
+            logger.error(f"❌ 飞书检测连麦状态异常: {e}")

@@ -7,3 +7,4 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
 PG_DSN    = os.environ.get("PG_DSN")
 REDIS_URL = os.environ.get("REDIS_URL")
+TARGET_ANCHOR_ID = os.environ.get("TARGET_ANCHOR_ID", "63871524957")

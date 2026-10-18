@@ -294,7 +294,7 @@ async def push_to_update_queue(redis, target: str, current_level: int, q_type: s
     # 组合带类型的 target，例如 "uid:12345" 或 "did:67890"
     formatted_target = f"{q_type}:{target}" if q_type else target
     
-    cooldown_seconds = 432000
+    cooldown_seconds = 604800
     # 锁和队列中的 member 都使用这个带前缀的值
     lock_key = f"czlevel:cd_lock:{formatted_target}" 
     

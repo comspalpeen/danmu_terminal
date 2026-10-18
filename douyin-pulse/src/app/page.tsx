@@ -6,7 +6,7 @@ import { Author } from '../types/author';
 import QnaModal from '@/components/QnaModal';
 import DailyReportModal from '@/components/DailyReportModal';
 import { useRouter } from 'next/navigation';
-import { Search, MessageSquare, FileText } from "lucide-react";
+import { Search, FileText } from "lucide-react";
 import ThemeSwitcher from '@/components/ThemeSwitcher';
 
 export default function Home() {
@@ -72,15 +72,6 @@ export default function Home() {
                             <div className="absolute bottom-0 right-0 w-1 h-1 border-b border-r border-current opacity-100 [.theme-pink_&]:opacity-0 transition-opacity"></div>
                             <Search className="w-4 h-4" />
                             <span>搜索</span>
-                        </button>
-                        <button 
-                            onClick={() => router.push('/tieba')}
-                            className="relative border border-primary/50 bg-primary/10 text-primary px-6 h-10 font-bold hover:bg-primary hover:text-primary-foreground transition-all group rounded-[var(--radius)] flex items-center gap-2"
-                        >
-                            <div className="absolute top-0 left-0 w-1 h-1 border-t border-l border-current opacity-100 [.theme-pink_&]:opacity-0 transition-opacity"></div>
-                            <div className="absolute bottom-0 right-0 w-1 h-1 border-b border-r border-current opacity-100 [.theme-pink_&]:opacity-0 transition-opacity"></div>
-                            <MessageSquare className="w-4 h-4" />
-                            <span>贴吧</span>
                         </button>
                     </div>
                 </header>

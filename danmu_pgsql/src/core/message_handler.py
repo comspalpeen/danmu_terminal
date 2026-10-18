@@ -7,29 +7,35 @@ from src.db.redis_client import get_redis
 from src.utils.fetcher_utils import get_safe_url
 from src.utils.fetcher_utils import extract_user_info
 import re
-
+import asyncio
+from src.utils.feishu_notifier import FeishuNotifier
+from config import TARGET_ANCHOR_ID
 logger = logging.getLogger("MsgHandler")
 GUARD_PRICE_MONTH = 1280
 GUARD_PRICE_YEAR = 15360
 STAR_GUARD_ICON = "https://p3-webcast.douyinpic.com/img/webcast/4e545aebe35e35808b91cc2d93587967.png~tplv-obj.image"
+
 class MessageHandler:
-    def __init__(self, live_id, room_id, db, gift_processor, anchor_id=None):
-        self.live_id = live_id
+    def __init__(self, room_id, db, gift_processor, anchor_id=None):
         self.room_id = room_id
         self.db = db
         self.gift_processor = gift_processor
-
+        self.notifier = FeishuNotifier()  # 初始化一次复用
         self.last_seq_state = None
         self.last_seq_time = 0
-        #self.THROTTLE_INTERVAL = 1
-        self.anchor_id = anchor_id or ""  # 新增这一行，接收并保存主播的真实 UID
+        
+        # ====== 核心主键配置 ======
+        self.anchor_id = str(anchor_id or "")
+        self.target_anchor_id = TARGET_ANCHOR_ID
+        # ==========================
+        
         self.vip_users_cache = {}
-        #self.current_guest_mic_users = set()
 
         # PK runtime state
         self.left_team_id = None
         self.right_team_id = None
         self.current_battle_id = None
+        
     async def _reset_pk_state(self):
         """清理运行时的 PK 状态，并在 Redis 中销毁开始锁"""
         self.left_team_id = None
@@ -56,9 +62,6 @@ class MessageHandler:
         if self.left_team_id is None:
             self.left_team_id = teams[0]["team_id"]
             self.right_team_id = teams[1]["team_id"]
-            # logger.info(
-            #     f"[PK] 锁定左右阵营 room={self.room_id} left={self.left_team_id} right={self.right_team_id}"
-            # )
             return teams
 
         team_map = {team["team_id"]: team for team in teams}
@@ -75,11 +78,11 @@ class MessageHandler:
         return teams
 
     async def handle(self, method, payload):
-        if method in (# "WebcastFansclubMessage", 
-                      "WebcastSocialMessage",
+        if method in ("WebcastSocialMessage",
                       "WebcastRoomMessage",
                       "WebcastEmojiChatMessage"):
-            if str(self.live_id) != "615189692839":
+            # 只有专属主播直播间，才处理上述类型的进房/互动消息
+            if self.anchor_id != self.target_anchor_id:
                 return False
         try:
             if method == "WebcastChatMessage":
@@ -102,20 +105,16 @@ class MessageHandler:
                 await self._parse_fansclub(payload)
             elif method == "WebcastSocialMessage":
                 await self._parse_social(payload)
-            elif method == "WebcastRoomMessage":          # 新增：拦截 VIP 通道等直播间特殊消息
-                await self._parse_room_message(payload)   # 新增：调用专门的解析方法
+            elif method == "WebcastRoomMessage":
+                await self._parse_room_message(payload)
             elif method == "WebcastEmojiChatMessage":
                 await self._parse_emojichat(payload)
-            # elif method == "WebcastLinkMessage":
-            #      await self._parse_link_message(payload)
             elif method == "WebcastLinkMicMethod":
                 await self._parse_pk_process(payload)
             elif method == "WebcastLinkMicBattleFinishMethod":
                 await self._parse_pk_finish(payload)
             elif method == 'WebcastLinkMicBattleMethod':
                 await self._parse_pk_start(payload) 
-            #elif method == "WebcastRoomStatsMessage":
-            #    await self._parse_room_stats(payload)
             
         except Exception as e:
             logger.error(f"消息分发解析异常 [{method}]: {e}", exc_info=True)
@@ -139,17 +138,17 @@ class MessageHandler:
             message = douyin_pb2.ChatMessage()
             message.ParseFromString(payload)
     
-            user_info = extract_user_info(message.user, self.live_id)
+            user_info = extract_user_info(message.user, self.anchor_id)
             event_ts = message.eventTime
             event_time_val = event_ts if event_ts > 0 else time.time()
     
             chat_data = {
-                "web_rid": self.live_id,
+                "anchor_id": self.anchor_id, # 核心主键
                 "room_id": self.room_id,
                 "content": message.content,
                 "event_time": event_time_val,
                 "created_at": time.time(),
-                "_msg_type": "chat"  # ✅ 新增标记：告诉解析器这是弹幕
+                "_msg_type": "chat"  
             }
             chat_data.update(user_info)
     
@@ -171,38 +170,30 @@ class MessageHandler:
             message.ParseFromString(payload)
             gift = message.gift
 
-            user_info = extract_user_info(message.user, self.live_id)
+            user_info = extract_user_info(message.user, self.anchor_id)
 
             # 默认取表层属性 (底座外壳)
             gift_name = gift.name
             gift_icon_url = get_safe_url(gift.icon)
 
-            # =====================================================================
-            # --- 新增核心：全局礼物皮肤/融合剥离器 (不再局限于工坊宝箱) ---
-            # =====================================================================
             if message.HasField("common") and message.common.HasField("displayText"):
                 extracted_name = ""
                 extracted_icon = ""
                 
                 for piece in message.common.displayText.piecesList:
-                    # type=1 为文本变量，包含真实的礼物名称
                     if piece.type == 1 and piece.stringValue:
                         val = piece.stringValue.strip()
-                        # 过滤掉表示数量的后缀(如 "x1", "x10")，剩下的就是真实名字
                         if val and not val.startswith("x") and not val.startswith("X"):
                             extracted_name = val
                     
-                    # type=15 藏匿了该特效礼物对应的专属炫酷图标
                     elif piece.type == 15 and piece.HasField("imageValue"):
                         extracted_icon = get_safe_url(piece.imageValue.image)
                 
-                # 如果提取到了合法的真名，且与底座外壳名字不同，说明是套壳礼物，直接覆盖！
                 if extracted_name and extracted_name != gift_name:
                     logger.debug(f"[GiftSkin] 触发脱壳: {gift_name} -> {extracted_name}")
                     gift_name = extracted_name
                     if extracted_icon:
                         gift_icon_url = extracted_icon
-            # =====================================================================
 
             repeat_count = message.repeatCount
             combo_count = message.comboCount
@@ -218,13 +209,23 @@ class MessageHandler:
     
             if message.HasField("toUser") and message.toUser.id:
                 to_user_id = str(message.toUser.id)
+
+            target_uid = self.target_anchor_id
+            if to_user_id == target_uid and str(self.anchor_id) != target_uid:
+                asyncio.create_task(
+                    self.notifier.check_guest_mic_and_notify(
+                        target_uid=target_uid, 
+                        current_room_id=self.room_id,
+                        target_name="目标主播"
+                    )
+                )
             gift_data = {
-                "web_rid": self.live_id,
+                "anchor_id": self.anchor_id,
                 "room_id": self.room_id,
                 "to_user_id": to_user_id,
-                "gift_icon_url": gift_icon_url,  # 使用覆盖后的真实URL
+                "gift_icon_url": gift_icon_url,  
                 "gift_id": str(gift.id),
-                "gift_name": gift_name,          # 使用覆盖后的真实名称
+                "gift_name": gift_name,          
                 "diamond_count": diamond_count,
                 "combo_count": combo_count,
                 "group_count": group_count,
@@ -249,9 +250,9 @@ class MessageHandler:
             if not msg.HasField("user") or not msg.content:
                 return
 
-            user_info = extract_user_info(msg.user, self.live_id)
+            user_info = extract_user_info(msg.user, self.anchor_id)
             chat_data = {
-                "web_rid": self.live_id,
+                "anchor_id": self.anchor_id,
                 "room_id": str(self.room_id),
                 "content": f"[房管飘屏] {msg.content}",
                 "event_time": time.time(),
@@ -271,9 +272,9 @@ class MessageHandler:
             if not msg.HasField("user") or not msg.content:
                 return
 
-            user_info = extract_user_info(msg.user, self.live_id)
+            user_info = extract_user_info(msg.user, self.anchor_id)
             chat_data = {
-                "web_rid": self.live_id,
+                "anchor_id": self.anchor_id,
                 "room_id": str(self.room_id),
                 "content": f"[特权飘屏] {msg.content}",
                 "event_time": time.time(),
@@ -288,9 +289,6 @@ class MessageHandler:
 
     async def _parse_user_seq(self, payload):
         now = time.time()
-       # if now - self.last_seq_time < self.THROTTLE_INTERVAL:
-        #    return
-
         time_diff = now - self.last_seq_time if self.last_seq_time > 0 else 0
         self.last_seq_time = now
 
@@ -312,13 +310,14 @@ class MessageHandler:
                     await self.db.increment_room_stats(self.room_id, inc_data)
         except Exception as e:
             logger.error(f"解析 UserSeq 异常: {e}", exc_info=True)
+            
     async def _parse_like(self, payload):
         try:
             message = douyin_pb2.LikeMessage()
             message.ParseFromString(payload)
 
             if message.HasField("user"):
-                user_info = extract_user_info(message.user, self.live_id)
+                user_info = extract_user_info(message.user, self.anchor_id)
                 await self._check_and_save_vip(user_info)
 
             if self.db and self.room_id:
@@ -327,7 +326,6 @@ class MessageHandler:
             logger.error(f"解析点赞异常: {e}", exc_info=True)
 
     async def _parse_pk_process(self, payload):
-        """解析过程包：验证锁、算分、合并资料后广播"""
         try:
             message = douyin_pb2.LinkMicMethod()
             message.ParseFromString(payload)
@@ -345,10 +343,8 @@ class MessageHandler:
             raw_start_info = await redis_client.get(f"pk:start:info:{self.room_id}")
             
             if not raw_start_info:
-                # 没拿到开始包，或者 PK 已正常结束导致锁被删，直接丢弃过程包
                 return
             
-            # 把 Redis 里的状态赋给 self，供后面的 _broadcast_snapshot 下发给前端
             self.pk_start_info = orjson.loads(raw_start_info)
 
             if self.current_battle_id != battle_id:
@@ -404,7 +400,6 @@ class MessageHandler:
             message = douyin_pb2.LinkMicBattleFinishMethod()
             message.ParseFromString(payload)
 
-            # 1. 清理运行时的 PK 状态
             await self._reset_pk_state()
 
             try:
@@ -425,7 +420,6 @@ class MessageHandler:
             scores_map = {}
             has_valid_win_status = False
             
-            # 2. 提取分数，并全局探测是否存在真实的 win_status (用于区分个人战和团队/1v1战)
             for score_item in message.scores:
                 uid = str(score_item.user_id)
                 win_status = int(getattr(score_item, "win_status", 0) or 0)
@@ -439,7 +433,6 @@ class MessageHandler:
                     "win_status": win_status,
                 }
 
-            # 3. 提取贡献榜 (榜一大哥)
             contrib_map = {}
             for c_group in message.contributors:
                 anchor_id = str(c_group.anchor_id_str or c_group.anchor_id)
@@ -456,14 +449,11 @@ class MessageHandler:
 
             total_anchors = sum(len(army.list) for army in message.anchors)
 
-            # 4. 判定模式
             mode_type = "team_battle" if (has_valid_win_status or total_anchors == 2) else "free_for_all"
 
-            # 5. 核心队伍划分逻辑 (回归经过业务验证的策略)
             teams_map = {}
             for army in message.anchors:
                 for anchor_item in army.list:
-                    # Proto3 安全读取判断
                     try:
                         if not anchor_item.HasField('user'): continue
                         uid = str(anchor_item.user.id)
@@ -494,7 +484,6 @@ class MessageHandler:
 
             final_teams = list(teams_map.values())
             
-            # 如果是个人战，按照排名对生成的各个“单人队伍”进行排序
             if mode_type == "free_for_all":
                 final_teams.sort(key=lambda t: t["anchors"][0]["rank"] if t["anchors"] else 999)
 
@@ -518,29 +507,26 @@ class MessageHandler:
                     "channel_id": channel_id,
                     "room_id": str(self.room_id),
                     "mode": mode_type,
-                    "status": 2, # 明确告知前端已结束
+                    "status": 2, 
                     "teams": final_teams,
                     "start_info": getattr(self, "pk_start_info", None), 
                     "updated_at": int(time.time() * 1000),
                 }
                 redis_client = get_redis()
-                # 只推送到 pub/sub 触发 SSE，不保留在 redis key 中
                 await redis_client.publish("pk:live:updates", orjson.dumps(final_snapshot).decode("utf-8"))
             except Exception as broadcast_e:
                 logger.error(f"发送 PK 结束谢幕包失败: {broadcast_e}")
 
-            # 清理运行时状态（保持原有逻辑）
             await self._reset_pk_state()
             try:
                 await get_redis().delete(f"pk:live:{self.room_id}")
             except Exception as redis_e:
                 pass
-
-            #logger.info(f"[PK] 正式结算入库 room={self.room_id} battle_id={battle_id} mode={mode_type} teams={len(final_teams)}")
         except Exception as e:
             logger.error(f"解析 PK 结算包异常: {e}", exc_info=True)
+            
     async def _check_and_save_vip(self, user_info):
-        if str(self.live_id) != "615189692839":
+        if self.anchor_id != self.target_anchor_id:
             return
         fans_level = user_info.get("fans_club_level", 0)
         if fans_level >= 1:
@@ -550,7 +536,7 @@ class MessageHandler:
             if now - last_record_time > 300:
                 self.vip_users_cache[uid] = now
                 if self.db:
-                    await self.db.upsert_vip_user(user_info, self.live_id)
+                    await self.db.upsert_vip_user(user_info, self.anchor_id)
 
     async def _parse_member(self, payload):
         try:
@@ -560,12 +546,10 @@ class MessageHandler:
             if message.HasField("user"):
                 user_obj = message.user
                 
-                # 1. 提取核心身份标识
                 is_mystery = getattr(user_obj, "mystery_man", 0) == 2
-                is_chenze = str(self.live_id) == "615189692839"
+                is_target_anchor = (self.anchor_id == self.target_anchor_id)
                 
-                # 【优化点1】进场消息其他房间只有满足神秘/匿名才进行后续处理，大幅减少不必要的解析开销[cite: 3]
-                if not is_mystery and not is_chenze:
+                if not is_mystery and not is_target_anchor:
                     return
                 
                 if is_mystery:
@@ -573,10 +557,8 @@ class MessageHandler:
                     real_sec_uid = getattr(user_obj, "secUid", "")
                     real_display_id = getattr(user_obj, "displayId", "")
                     
-                    # 【优化点2】严格限制正则开销：只有 mystery_man==2 AND user_id==111111 才需要正则[cite: 3]
                     is_dou_user = False
                     if user_obj.id == 111111:
-                        # 满足条件后才执行正则匹配
                         is_dou_user = bool(re.match(r'^dou\d{7}$', user_obj.nickName, re.IGNORECASE))
                         
                         try:
@@ -585,12 +567,10 @@ class MessageHandler:
                                     if piece.HasField("userValue") and piece.userValue.HasField("user"):
                                         real_user = piece.userValue.user
                                         if real_user.id and real_user.id != 111111:
-                                            # 拿到真实的底层数据
                                             real_uid = str(real_user.id)
                                             real_sec_uid = getattr(real_user, "secUid", "")
                                             real_display_id = getattr(real_user, "displayId", "")
                                             
-                                            # 修复内存对象的属性
                                             user_obj.id = real_user.id
                                             user_obj.secUid = real_sec_uid
                                             user_obj.displayId = real_display_id
@@ -598,12 +578,10 @@ class MessageHandler:
                         except Exception as e:
                             logger.warning(f"[Member] 尝试还原双开隐身用户真实ID失败: {e}")
     
-                    # 统一主动预热缓存
                     if real_uid and real_uid != "111111":
                         webcast_uid = getattr(user_obj, "webcastUid", "")
                         
-                        # 延迟到必须用的时候才提取完整信息，减少非必要对象的字典构造
-                        temp_info = extract_user_info(user_obj, self.live_id)
+                        temp_info = extract_user_info(user_obj, self.anchor_id)
                         user_name = temp_info.get('user_name', '')
                         pay_grade = temp_info.get('pay_grade', 0)
     
@@ -619,50 +597,42 @@ class MessageHandler:
                         if webcast_uid:
                             pipe.setex(f"mystery:uid:{webcast_uid}", 21600, orjson.dumps(resolved_info))
                             
-                        # 使用前面算好的 is_dou_user 标志进行缓存[cite: 3]
                         if is_dou_user and pay_grade > 0:
                             combo_key = f"mystery:combo:{user_name}:{pay_grade}"
                             pipe.setex(combo_key, 86400 * 5, orjson.dumps(resolved_info))
                             
                         await pipe.execute()
     
-                # 【优化点3】陈泽直播间单独提取完整信息并扔到 VIP 通道[cite: 3]
-                if is_chenze:
-                    final_user_info = extract_user_info(user_obj, self.live_id)
+                if is_target_anchor:
+                    final_user_info = extract_user_info(user_obj, self.anchor_id)
                     await self._check_and_save_vip(final_user_info)
                 
         except Exception as e:
             logger.error(f"解析 MemberMessage 异常: {e}", exc_info=True)
+            
     async def _parse_fansclub(self, payload):
         try:
             message = douyin_pb2.FansclubMessage()
             message.ParseFromString(payload)
             
             action = int(getattr(message, "action", 0) or 0)
-            is_chenze = (str(self.live_id) == "615189692839")
+            is_target_anchor = (self.anchor_id == self.target_anchor_id)
             
-            # 【核心优化 1：极速短路拦截】
-            # 如果既不是陈泽直播间（不需要记VIP），也不是星守护充值（action=7），直接丢弃！
-            if not is_chenze and action != 7:
+            if not is_target_anchor and action != 7:
                 return
                 
             if not message.HasField("user"):
                 return
                 
-            # 【核心优化 2：延迟提取 (Lazy Evaluation)】
-            # 提前声明为空，按需构造，避免不必要的正则和循环开销
             user_info = None
 
-            # 1. 只有陈泽直播间才走 VIP 同步逻辑
-            if is_chenze:
-                user_info = extract_user_info(message.user, self.live_id)
+            if is_target_anchor:
+                user_info = extract_user_info(message.user, self.anchor_id)
                 await self._check_and_save_vip(user_info)
             
-            # 2. 全局放开的星守护充值拦截
             if action == 7:
                 uid = str(message.user.id)
                 
-                # 提取底层属性
                 try:
                     fans_data = message.user.FansClub.data
                     anchor_id = str(getattr(fans_data, "anchorId", getattr(message, "anchorId", "0")))
@@ -676,15 +646,13 @@ class MessageHandler:
                     )
                     
                     if is_valid and self.gift_processor:
-                        # 【核心优化 3：如果前面没提取过用户信息，这里再补提】
                         if user_info is None:
-                            user_info = extract_user_info(message.user, self.live_id)
+                            user_info = extract_user_info(message.user, self.anchor_id)
                             
-                        # 组装虚拟礼物
                         gift_data = {
-                            "web_rid": self.live_id,
+                            "anchor_id": self.anchor_id,
                             "room_id": self.room_id,
-                            "to_user_id": self.anchor_id,  # 新增这一行，默认将星守护流水算给主播
+                            "to_user_id": self.anchor_id,
                             "gift_icon_url": icon_url,
                             "gift_id": "star_guard_action", 
                             "gift_name": gift_name,
@@ -700,7 +668,6 @@ class MessageHandler:
                         }
                         gift_data.update(user_info)
                         
-                        #logger.info(f"[StarGuard] 捕获星守护充值: {user_info.get('user_name')} 充值 {gift_name}")
                         await self.gift_processor.process_gift(gift_data)
 
         except Exception as e:
@@ -711,10 +678,11 @@ class MessageHandler:
             message = douyin_pb2.SocialMessage()
             message.ParseFromString(payload)
             if message.HasField("user"):
-                user_info = extract_user_info(message.user, self.live_id)
+                user_info = extract_user_info(message.user, self.anchor_id)
                 await self._check_and_save_vip(user_info)
         except Exception:
             pass
+            
     async def _parse_room_message(self, payload):
         try:
             message = douyin_pb2.RoomMessage()
@@ -722,74 +690,37 @@ class MessageHandler:
             if message.HasField("common") and message.common.HasField("displayText"):
                 for piece in message.common.displayText.piecesList:
                     if piece.HasField("userValue") and piece.userValue.HasField("user"):
-                        user_info = extract_user_info(piece.userValue.user, self.live_id)
+                        user_info = extract_user_info(piece.userValue.user, self.anchor_id)
                         await self._check_and_save_vip(user_info)
 
         except Exception as e:
             logger.error(f"解析 RoomMessage 异常: {e}", exc_info=True)
+            
     async def _parse_emojichat(self, payload):
         try:
             message = douyin_pb2.EmojiChatMessage()
             message.ParseFromString(payload)
             if message.HasField("user"):
-                user_info = extract_user_info(message.user, self.live_id)
+                user_info = extract_user_info(message.user, self.anchor_id)
                 await self._check_and_save_vip(user_info)
         except Exception:
             pass
-    # async def _parse_link_message(self, payload):
-    #     try:
-    #         message = douyin_pb2.LinkMessage()
-    #         message.ParseFromString(payload)
-    #         if message.scene != 8:
-    #             return
-
-    #         has_change = message.HasField("linked_list_change_content")
-    #         has_update = message.HasField("update_user_content")
-
-    #         target_user_id = 63871524957
-    #         target_own_room = "615189692839"
-
-    #         if has_change or has_update:
-    #             linked_users = []
-    #             if has_change:
-    #                 linked_users = message.linked_list_change_content.linked_users
-    #             elif has_update:
-    #                 linked_users = message.update_user_content.linked_users
-
-    #             current_packet_user_ids = set()
-    #             for lu in linked_users:
-    #                 if lu.HasField("user"):
-    #                     if str(self.live_id) == target_own_room and lu.user.id == target_user_id:
-    #                         continue
-    #                     current_packet_user_ids.add(lu.user.id)
-
-    #             if target_user_id in current_packet_user_ids and target_user_id not in self.current_guest_mic_users:
-    #                 logger.info(f"[Link] 目标刚上麦 room={self.live_id}")
-    #             elif target_user_id not in current_packet_user_ids and target_user_id in self.current_guest_mic_users:
-    #                 logger.info(f"[Link] 目标已下麦 room={self.live_id}")
-
-    #             self.current_guest_mic_users = current_packet_user_ids
-    #     except Exception as e:
-    #         logger.error(f"_parse_link_message 解析异常: {e}", exc_info=True)
+            
     async def _parse_pk_start(self, payload):
-        """解析开始包：写入倒计时锁和主播资料到 Redis"""
         try:
             message = douyin_pb2.LinkMicBattle()
             message.ParseFromString(payload)
             info = message.info
             redis_client = get_redis()
             
-            # 1. 提取并持久化倒计时/开始状态到 Redis
             start_data = {
                 "start_time_ms": info.start_time_ms,
                 "duration": info.duration,
                 "battle_id": str(info.battle_id)
             }
             state_key = f"pk:start:info:{self.room_id}"
-            # 加上 60 秒的缓冲期，防止稍微超时就被自动清理
             await redis_client.set(state_key, orjson.dumps(start_data), ex=info.duration + 60)
 
-            # 2. 提取并持久化主播资料到 Redis 全局 Hash
             anchor_data = {}
             for army in message.anchors:
                 for anchor_item in army.list:
@@ -799,27 +730,22 @@ class MessageHandler:
                             "nickname": anchor_item.user.nickname,
                             "avatar": get_safe_url(anchor_item.user.avatar_thumb)
                         }
-                        # orjson.dumps 出来是 bytes，解码为 str 存入 Hash
                         anchor_data[uid] = orjson.dumps(data).decode('utf-8')
 
             if anchor_data:
                 await redis_client.hset("pk:anchor:cache", mapping=anchor_data)
-                await redis_client.expire("pk:anchor:cache", 86400) # 主播资料保留 24 小时
+                await redis_client.expire("pk:anchor:cache", 86400)
 
-            #logger.info(f"[PK] 激活开始锁并持久化至 Redis: {start_data}")
-
-            # 3. 广播初始空包 (携带 channel_id 给前端开辟空间)
             channel_id = str(getattr(message, "channel_id", getattr(info, "channel_id", "")))
-            self.pk_start_info = start_data  # 临时赋值给 self 供紧接着的广播使用
+            self.pk_start_info = start_data 
             await self._broadcast_snapshot(info.battle_id, channel_id, [])
 
         except Exception as e:
             logger.error(f"解析开始包异常: {e}", exc_info=True)
+            
     async def _broadcast_snapshot(self, battle_id, channel_id, teams):
-        """统一封装打包发给 Redis 发布订阅流"""
         try:
             mode_type = "free_for_all" if len(teams) > 2 else "team_battle"
-
 
             left_score = next((t["team_score"] for t in teams if t["team_id"] == self.left_team_id), 0) if self.left_team_id else 0
             right_score = next((t["team_score"] for t in teams if t["team_id"] == self.right_team_id), 0) if self.right_team_id else 0
@@ -842,18 +768,13 @@ class MessageHandler:
             redis_client = get_redis()
             payload_str = orjson.dumps(snapshot).decode("utf-8")
             
-            # SSE 状态快照，过期时间设为 5 分钟
             await redis_client.set(f"pk:live:{self.room_id}", payload_str, ex=300)
-            # 触发 SSE 实时推送
             await redis_client.publish("pk:live:updates", payload_str)
             
         except Exception as e:
             logger.error(f"❌ [PK 广播错误]: {e}", exc_info=True)
+            
     async def _resolve_star_guard(self, user_id: str, anchor_id: str, new_expired_sec: int):
-        """
-        计算星守护实际充值金额，防重与冷启动盲猜
-        返回: (is_valid, gift_name, diamond_count, icon_url)
-        """
         now_sec = int(time.time())
         if new_expired_sec <= now_sec:
             return False, "", 0, ""
@@ -870,31 +791,21 @@ class MessageHandler:
         gift_name = ""
         diamond_count = 0
 
-        # 1. 缓存命中：算增量
         if old_expired_sec > now_sec:
             delta_days = round((new_expired_sec - old_expired_sec) / 86400.0)
             
-            # 【放宽约束】：只要是旧数据且无增量（或乱序回退），统统拦截去重
             if delta_days <= 0:
                 return False, "", 0, ""
                 
-            # 命中一年的跨度
             if 359 <= delta_days <= 373:
                 gift_name, diamond_count = "星守护(12个月)", GUARD_PRICE_YEAR
             else:
-                # 【放宽约束】：包容漏包导致的时间跨度变大（如 60天、90天）。
-                # 只要是正数增量且不是一年，就认定为单次 1 个月的续费操作。
-                # Redis 会在下方自动将游标对齐到这个跳跃后的 new_expired_sec。
                 gift_name, diamond_count = "星守护(1个月)", GUARD_PRICE_MONTH
 
-        
-        # 2. 缓存未命中 (冷启动)：依据总天数推算
         else:
-            # 零点对齐：获取今日北京时间 00:00:00 的时间戳
             today_zero = now_sec - ((now_sec + 8 * 3600) % 86400)
             total_days = round((new_expired_sec - today_zero) / 86400.0)
             
-            # 边界异常过滤 (最高15个月物理隔离)
             if total_days <= 0 or total_days > 465:
                 return False, "", 0, ""
                 
@@ -903,7 +814,6 @@ class MessageHandler:
             else:
                 gift_name, diamond_count = "星守护(1个月)", GUARD_PRICE_MONTH
 
-        # 3. 推进 Redis 防重游标 (TTL 设为守护到期时间 + 7天容余缓冲)
         ttl = max((new_expired_sec - now_sec) + 7 * 86400, 86400)
         try:
             await redis_client.set(redis_key, str(new_expired_sec), ex=ttl)
@@ -911,3 +821,28 @@ class MessageHandler:
             logger.error(f"[StarGuard] Redis 游标写入失败: {e}")
 
         return True, gift_name, diamond_count, STAR_GUARD_ICON
+        
+    async def _check_guest_mic_and_notify(self, target_uid, current_room_id):
+        try:
+            redis_client = get_redis()
+            if not redis_client:
+                return
+    
+            own_state_key = f"feishu:state:{target_uid}"
+            own_state = await redis_client.get(own_state_key)
+            if own_state and own_state.decode('utf-8') == "1":
+                return
+    
+            lock_key = f"feishu:guest_lock:{target_uid}:{current_room_id}"
+            is_first_time = await redis_client.set(lock_key, "1", nx=True, ex=14400)
+            
+            if not is_first_time:
+                return
+    
+            msg = f"🎙️ 发现 陈泽 正在其他直播间连麦！\n当前所在房间 Room ID: {current_room_id}"
+            await self.notifier._send_simple_text(msg)
+            
+            logger.info(f"✅ [连麦雷达] 成功触发跨房连麦通知 (所在房间: {current_room_id})")
+    
+        except Exception as e:
+            logger.error(f"❌ 检测连麦状态异常: {e}")
